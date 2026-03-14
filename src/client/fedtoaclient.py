@@ -36,7 +36,42 @@ class FedtoaClient(FedavgClient):
             return int(self.global_blueprint.topology_mean.shape[0])
         if hasattr(self.args, "num_classes") and self.args.num_classes is not None:
             return int(self.args.num_classes)
-        raise ValueError("num_classes is required for FedToA client operations.")
+        if hasattr(self.args, "fedtoa_group_count") and self.args.fedtoa_group_count is not None:
+            return int(self.args.fedtoa_group_count)
+        return 128
+
+    @staticmethod
+    def _as_group_ids(candidate, batch_size: int, device: torch.device) -> torch.Tensor | None:
+        if not torch.is_tensor(candidate):
+            candidate = torch.as_tensor(candidate)
+        if candidate.ndim != 1 or candidate.shape[0] != batch_size:
+            return None
+        if not (torch.is_floating_point(candidate) or candidate.dtype in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8)):
+            return None
+        return candidate.to(device=device, dtype=torch.long)
+
+    def _resolve_topology_groups(self, batch, batch_size: int, device: torch.device):
+        if not isinstance(batch, (tuple, list)):
+            return None
+
+        # Retrieval dataloaders expose semantic group/image ids as later fields.
+        for idx in range(2, len(batch)):
+            group_ids = self._as_group_ids(batch[idx], batch_size=batch_size, device=device)
+            if group_ids is not None:
+                return group_ids
+
+        # Supervised classification fallback: use labels as topology groups.
+        if len(batch) >= 2:
+            return self._as_group_ids(batch[1], batch_size=batch_size, device=device)
+        return None
+
+    def _map_groups_to_table(self, group_ids: torch.Tensor, num_groups: int) -> torch.Tensor:
+        group_ids = group_ids.abs().to(dtype=torch.long)
+        if group_ids.numel() == 0:
+            return group_ids
+        if int(group_ids.max()) < num_groups:
+            return group_ids
+        return torch.remainder(group_ids, num_groups)
 
     def _prompt_name_tokens(self) -> tuple[str, ...]:
         tokens = getattr(self.args, "fedtoa_prompt_param_names", None)
@@ -95,45 +130,56 @@ class FedtoaClient(FedavgClient):
         self.model.eval()
         self.model.to(self.device)
 
-        feat_img, feat_txt, all_labels = [], [], []
+        feat_img, feat_txt, all_groups = [], [], []
+        fallback_group_offset = 0
 
         for batch in self.train_loader:
             if self.modality == "img":
                 x, y = batch
                 x = x.to(self.device)
-                y = y.to(self.device)
                 f = self.model([x, None], feat_out=True)[0]
                 feat_img.append(f)
-                all_labels.append(y)
+                groups = self._resolve_topology_groups(batch, batch_size=x.shape[0], device=self.device)
+                if groups is None:
+                    groups = torch.arange(fallback_group_offset, fallback_group_offset + x.shape[0], device=self.device)
+                    fallback_group_offset += x.shape[0]
+                all_groups.append(groups)
             elif self.modality == "txt":
                 x, y = batch
                 x = x.to(self.device)
-                y = y.to(self.device)
                 f = self.model([None, x], feat_out=True)[1]
                 feat_txt.append(f)
-                all_labels.append(y)
+                groups = self._resolve_topology_groups(batch, batch_size=x.shape[0], device=self.device)
+                if groups is None:
+                    groups = torch.arange(fallback_group_offset, fallback_group_offset + x.shape[0], device=self.device)
+                    fallback_group_offset += x.shape[0]
+                all_groups.append(groups)
             elif self.modality == "img+txt":
                 x_img, x_txt, y, _, _ = batch
                 x_img = x_img.to(self.device)
                 x_txt = x_txt.to(self.device)
-                y = y.to(self.device)
                 out = self.model([x_img, x_txt], feat_out=True)
                 feat_img.append(out[0])
                 feat_txt.append(out[1])
-                all_labels.append(y)
+                groups = self._resolve_topology_groups(batch, batch_size=x_img.shape[0], device=self.device)
+                if groups is None:
+                    groups = torch.arange(fallback_group_offset, fallback_group_offset + x_img.shape[0], device=self.device)
+                    fallback_group_offset += x_img.shape[0]
+                all_groups.append(groups)
             else:
                 raise ValueError(f"Unsupported modality: {self.modality}")
 
-        labels = torch.cat(all_labels, dim=0)
+        groups = torch.cat(all_groups, dim=0)
         num_classes = self._num_classes()
+        mapped_groups = self._map_groups_to_table(groups, num_classes)
 
         if self.modality == "img":
-            proto, support = compute_class_prototypes(torch.cat(feat_img, dim=0), labels, num_classes)
+            proto, support = compute_class_prototypes(torch.cat(feat_img, dim=0), mapped_groups, num_classes)
         elif self.modality == "txt":
-            proto, support = compute_class_prototypes(torch.cat(feat_txt, dim=0), labels, num_classes)
+            proto, support = compute_class_prototypes(torch.cat(feat_txt, dim=0), mapped_groups, num_classes)
         else:
-            proto_img, support_img = compute_class_prototypes(torch.cat(feat_img, dim=0), labels, num_classes)
-            proto_txt, support_txt = compute_class_prototypes(torch.cat(feat_txt, dim=0), labels, num_classes)
+            proto_img, support_img = compute_class_prototypes(torch.cat(feat_img, dim=0), mapped_groups, num_classes)
+            proto_txt, support_txt = compute_class_prototypes(torch.cat(feat_txt, dim=0), mapped_groups, num_classes)
             proto, support = fuse_joint_prototypes(
                 proto_img=proto_img,
                 proto_txt=proto_txt,
@@ -155,7 +201,7 @@ class FedtoaClient(FedavgClient):
             topology=topo.detach().cpu(),
             spectral=spec.detach().cpu(),
             support_mask=support.detach().cpu(),
-            num_samples=int(labels.shape[0]),
+            num_samples=int(groups.shape[0]),
         )
         self.model.to("cpu")
         return payload
@@ -199,9 +245,14 @@ class FedtoaClient(FedavgClient):
                 logits, feats, targets = self._student_forward(batch)
 
                 task_loss = criterion(logits.to(targets.device), targets)
+                topology_groups = self._resolve_topology_groups(batch, batch_size=feats.shape[0], device=feats.device)
+                if topology_groups is None:
+                    topology_groups = targets.to(dtype=torch.long)
+                topology_groups = self._map_groups_to_table(topology_groups, num_classes)
+
                 local_proto, local_support = compute_class_prototypes(
                     feats,
-                    targets,
+                    topology_groups,
                     num_classes=num_classes,
                     normalize=True,
                 )

@@ -94,6 +94,24 @@ class TinyPromptModel(nn.Module):
         return [self.head(feats), None]
 
 
+class TinyMMPromptModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.img_backbone = nn.Linear(4, 4)
+        self.txt_backbone = nn.Linear(4, 4)
+        self.prompt = nn.Parameter(torch.zeros(4))
+
+    def forward(self, x, feat_out=False):
+        img, txt = x
+        img_feats = self.img_backbone(img) + self.prompt.unsqueeze(0)
+        txt_feats = self.txt_backbone(txt) + self.prompt.unsqueeze(0)
+        if feat_out:
+            img_norm = img_feats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            txt_norm = txt_feats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            return [img_feats / img_norm, txt_feats / txt_norm]
+        return [img_feats, txt_feats]
+
+
 def test_local_train_student_updates_prompt_only():
     _install_client_import_stubs()
     from client.fedtoaclient import FedtoaClient
@@ -152,3 +170,41 @@ def test_extract_teacher_topology_returns_class_level_payload():
     assert payload.support_mask.tolist() == [True, True, False]
     assert payload.class_ids.tolist() == [0, 1]
     assert payload.num_samples == 4
+
+
+def test_extract_teacher_topology_retrieval_without_class_labels():
+    _install_client_import_stubs()
+    from client.fedtoaclient import FedtoaClient
+
+    args = _build_args()
+    args.num_classes = None
+    args.fedtoa_group_count = 4
+
+    img_feats = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0], [0.8, 0.2, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.8, 0.2, 0.0]],
+        dtype=torch.float32,
+    )
+    txt_feats = torch.tensor(
+        [[0.9, 0.1, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.1, 0.9, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    # labels are placeholders and not used for topology grouping in retrieval path.
+    labels = torch.tensor([9, 8, 7, 6], dtype=torch.long)
+    group_ids = torch.tensor([10, 10, 17, 17], dtype=torch.long)
+    ann_ids = torch.tensor([101, 102, 103, 104], dtype=torch.long)
+    indices = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    ds = TensorDataset(img_feats, txt_feats, labels, group_ids, ann_ids, indices)
+
+    client = FedtoaClient(args=args, training_set=ds, test_set=ds, modality="img+txt", task="img+txt", eval_metrics=[])
+    client.id = 11
+    client.device = "cpu"
+    client.model = TinyMMPromptModel()
+
+    payload = client.extract_teacher_topology()
+
+    assert payload.client_id == 11
+    assert payload.topology.shape == (4, 4)
+    assert payload.spectral.shape == (2,)
+    assert payload.num_samples == 4
+    assert payload.class_ids.tolist() == [1, 2]
+    assert payload.support_mask.tolist() == [False, True, True, False]
