@@ -2,6 +2,11 @@
 
 from .losses import fedtoa_total_loss, masked_topology_loss, spectral_consistency_loss
 from .payloads import FedToAConfig, GlobalTopologyBlueprint, TeacherTopologyPayload
+from .prompt import (
+    ModalityAdaptiveStructuralPrompt,
+    PromptedAttentionAdapter,
+    prompt_lipschitz_regularization,
+)
 from .server_ops import (
     aggregate_topologies_mean,
     aggregate_topologies_var,
@@ -32,4 +37,7 @@ __all__ = [
     "masked_topology_loss",
     "spectral_consistency_loss",
     "fedtoa_total_loss",
+    "ModalityAdaptiveStructuralPrompt",
+    "PromptedAttentionAdapter",
+    "prompt_lipschitz_regularization",
 ]
