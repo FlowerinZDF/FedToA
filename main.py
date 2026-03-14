@@ -210,6 +210,24 @@ if __name__ == "__main__":
     ########################
     parser.add_argument('--mm_scale', type=float, default=100, help='coefficent for multi-modal clients')
 
+    ########################
+    # FedToA arguments    #
+    ########################
+    parser.add_argument('--use_topo', help='enable FedToA topology alignment term', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--use_spec', help='enable FedToA spectral consistency term', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--use_lip', help='enable FedToA prompt Lipschitz regularization term', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--tau', type=float, default=0.2, help='temperature for class-topology affinity in FedToA')
+    parser.add_argument('--eig_k', type=int, default=4, help='number of non-trivial Laplacian eigenvalues for FedToA spectral summaries')
+    parser.add_argument('--topk_edges', type=int, default=None, help='number of global topology edges retained by FedToA confidence masking')
+    parser.add_argument('--beta_topo', type=float, default=1.0, help='FedToA topology alignment loss weight')
+    parser.add_argument('--gamma_spec', type=float, default=1.0, help='FedToA spectral consistency loss weight')
+    parser.add_argument('--eta_lip', type=float, default=1.0, help='FedToA prompt Lipschitz regularization weight')
+    parser.add_argument('--prompt_len', type=int, default=10, help='FedToA prompt length')
+    parser.add_argument('--diagonal_eps', type=float, default=1e-4, help='diagonal epsilon for FedToA Laplacian/eigendecomposition stability')
+    parser.add_argument('--fedtoa_teacher_ids', type=int, nargs='+', default=None, help='optional explicit teacher client ids for FedToA rounds')
+    parser.add_argument('--fedtoa_group_count', type=int, default=None, help='optional number of local groups/classes used to build FedToA topology')
+    parser.add_argument('--fedtoa_var_threshold', type=float, default=None, help='optional edge variance threshold for FedToA confidence masking')
+
 
 
     ###################
