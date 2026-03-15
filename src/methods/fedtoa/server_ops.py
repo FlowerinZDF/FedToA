@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+from typing import Optional
 
 from .payloads import GlobalTopologyBlueprint
 
@@ -41,7 +42,7 @@ def build_confidence_mask(
     topo_mean: torch.Tensor,
     topo_var: torch.Tensor,
     topk_edges: int,
-    var_threshold: float | None = None,
+    var_threshold: Optional[float] = None,
 ) -> torch.Tensor:
     """Build confidence mask from mean/variance with sparsification.
 

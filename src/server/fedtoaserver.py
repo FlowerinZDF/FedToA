@@ -1,6 +1,7 @@
 import logging
 from collections import defaultdict
 from copy import deepcopy
+from typing import List
 
 import torch
 
@@ -33,7 +34,7 @@ class FedtoaServer(FedavgServer):
         super().__init__(args, writer, server_dataset, client_datasets, model_str)
         self.latest_blueprint = None
 
-    def _teacher_client_ids(self, selected_ids: list[int]) -> list[int]:
+    def _teacher_client_ids(self, selected_ids: List[int]) -> List[int]:
         configured_ids = getattr(self.args, "fedtoa_teacher_ids", None)
         if configured_ids is not None:
             configured = set(int(client_id) for client_id in configured_ids)
@@ -45,7 +46,7 @@ class FedtoaServer(FedavgServer):
             if getattr(self.clients[client_id], "modality", None) == "img+txt"
         ]
 
-    def _student_client_ids(self, selected_ids: list[int], teacher_ids: list[int]) -> list[int]:
+    def _student_client_ids(self, selected_ids: List[int], teacher_ids: List[int]) -> List[int]:
         teacher_set = set(teacher_ids)
         return [client_id for client_id in selected_ids if client_id not in teacher_set]
 
@@ -62,7 +63,7 @@ class FedtoaServer(FedavgServer):
                 elif self.round > (self.args.freeze_rounds + self.args.warmup_rounds):
                     self._unfreeze_params(client)
 
-    def _collect_teacher_payloads(self, teacher_ids: list[int]):
+    def _collect_teacher_payloads(self, teacher_ids: List[int]):
         payloads = []
         for client_id in teacher_ids:
             client = self.clients[client_id]
@@ -105,7 +106,7 @@ class FedtoaServer(FedavgServer):
             class_masks=class_masks,
         )
 
-    def _run_student_updates(self, student_ids: list[int], blueprint):
+    def _run_student_updates(self, student_ids: List[int], blueprint):
         update_sizes = {}
         update_results = {}
 

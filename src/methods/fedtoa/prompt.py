@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import List, Union
 
 import torch
 from torch import nn
@@ -100,8 +101,8 @@ class PromptedAttentionAdapter(nn.Module):
 
 
 def _iter_prompt_tensors(
-    prompt_params: ModalityAdaptiveStructuralPrompt | torch.Tensor | Iterable[torch.Tensor],
-) -> list[torch.Tensor]:
+    prompt_params: Union[ModalityAdaptiveStructuralPrompt, torch.Tensor, Iterable[torch.Tensor]],
+) -> List[torch.Tensor]:
     if isinstance(prompt_params, ModalityAdaptiveStructuralPrompt):
         return [prompt_params.prompt]
     if isinstance(prompt_params, torch.Tensor):
@@ -115,7 +116,7 @@ def _iter_prompt_tensors(
 
 
 def prompt_lipschitz_regularization(
-    prompt_params: ModalityAdaptiveStructuralPrompt | torch.Tensor | Iterable[torch.Tensor],
+    prompt_params: Union[ModalityAdaptiveStructuralPrompt, torch.Tensor, Iterable[torch.Tensor]],
     eps: float = 1e-8,
 ) -> torch.Tensor:
     """Compute spectral/Lipschitz regularization over prompt parameters.
@@ -133,7 +134,7 @@ def prompt_lipschitz_regularization(
         raise ValueError("eps must be positive.")
 
     tensors = _iter_prompt_tensors(prompt_params)
-    penalties: list[torch.Tensor] = []
+    penalties: List[torch.Tensor] = []
     for param in tensors:
         if param.numel() == 0:
             continue

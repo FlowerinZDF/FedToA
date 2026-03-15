@@ -1,3 +1,5 @@
+from typing import List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 
@@ -29,7 +31,7 @@ class FedtoaClient(FedavgClient):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.global_blueprint: GlobalTopologyBlueprint | None = None
+        self.global_blueprint: Optional[GlobalTopologyBlueprint] = None
 
     def _num_classes(self) -> int:
         if self.global_blueprint is not None:
@@ -41,7 +43,7 @@ class FedtoaClient(FedavgClient):
         return 128
 
     @staticmethod
-    def _as_group_ids(candidate, batch_size: int, device: torch.device) -> torch.Tensor | None:
+    def _as_group_ids(candidate, batch_size: int, device: torch.device) -> Optional[torch.Tensor]:
         if not torch.is_tensor(candidate):
             candidate = torch.as_tensor(candidate)
         if candidate.ndim != 1 or candidate.shape[0] != batch_size:
@@ -73,7 +75,7 @@ class FedtoaClient(FedavgClient):
             return group_ids
         return torch.remainder(group_ids, num_groups)
 
-    def _prompt_name_tokens(self) -> tuple[str, ...]:
+    def _prompt_name_tokens(self) -> Tuple[str, ...]:
         tokens = getattr(self.args, "fedtoa_prompt_param_names", None)
         if tokens is None:
             return ("prompt",)
@@ -81,7 +83,7 @@ class FedtoaClient(FedavgClient):
             return (tokens,)
         return tuple(tokens)
 
-    def _configure_trainable_params(self) -> list[torch.nn.Parameter]:
+    def _configure_trainable_params(self) -> List[torch.nn.Parameter]:
         freeze_backbone = bool(getattr(self.args, "freeze_backbone", True))
         prompt_only = bool(getattr(self.args, "fedtoa_prompt_only", True))
         prompt_tokens = self._prompt_name_tokens()
@@ -90,7 +92,7 @@ class FedtoaClient(FedavgClient):
             for param in self.model.parameters():
                 param.requires_grad = False
 
-        prompt_params: list[torch.nn.Parameter] = []
+        prompt_params: List[torch.nn.Parameter] = []
         for name, param in self.model.named_parameters():
             if any(token in name for token in prompt_tokens):
                 param.requires_grad = True

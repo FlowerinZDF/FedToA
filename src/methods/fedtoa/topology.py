@@ -6,6 +6,7 @@ All operations are class-level and support-mask aware.
 from __future__ import annotations
 
 import torch
+from typing import Tuple
 import torch.nn.functional as F
 
 
@@ -14,7 +15,7 @@ def compute_class_prototypes(
     labels: torch.Tensor,
     num_classes: int,
     normalize: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute class-level prototypes from features and integer labels.
 
     Args:
@@ -67,7 +68,7 @@ def fuse_joint_prototypes(
     support_mask_img: torch.Tensor,
     support_mask_txt: torch.Tensor,
     normalize: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fuse image/text class prototypes into a joint class prototype table.
 
     Args:
