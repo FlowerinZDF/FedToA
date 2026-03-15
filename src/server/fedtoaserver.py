@@ -120,12 +120,52 @@ class FedtoaServer(FedavgServer):
             self.clients[client_id].modality = resolved_modality
         return resolved_modality
 
+    @staticmethod
+    def _expected_model_layout(resolved_modality: Optional[str]):
+        if resolved_modality == "img":
+            return ["img", None]
+        if resolved_modality == "txt":
+            return [None, "txt"]
+        if resolved_modality == "img+txt":
+            return ["img", "txt"]
+        return None
+
+    def _align_client_model_layout(self, client, resolved_modality: Optional[str]):
+        """Align runtime model modality slots with resolved FedToA role modality.
+
+        FedAvg downloads models per dataset key, which can leave student clients
+        with multimodal model layouts even after ``client.modality`` is rebound.
+        FedCola unimodal behavior requires the inactive slot to be ``None`` so
+        ``self.model([inputs, None])`` / ``self.model([None, inputs])`` is valid.
+        """
+
+        if client.model is None or not hasattr(client.model, "modalities"):
+            return
+
+        expected_layout = self._expected_model_layout(resolved_modality)
+        if expected_layout is None:
+            return
+
+        current_layout = list(client.model.modalities)
+        if current_layout == expected_layout:
+            return
+
+        client.model.modalities = expected_layout
+        logger.info(
+            "[FEDTOA][LAYOUT] client %s modality=%s model.modalities %s -> %s",
+            client.id,
+            resolved_modality,
+            current_layout,
+            expected_layout,
+        )
+
     def _collect_teacher_payloads(self, teacher_ids: List[int]):
         payloads = []
         for client_id in teacher_ids:
             client = self.clients[client_id]
-            self._bind_resolved_client_modality(client_id)
+            resolved_modality = self._bind_resolved_client_modality(client_id)
             self._prepare_client_for_round(client)
+            self._align_client_model_layout(client, resolved_modality)
             payload = client.extract_teacher_topology()
             payloads.append(payload)
         return payloads
@@ -171,8 +211,9 @@ class FedtoaServer(FedavgServer):
 
         for client_id in student_ids:
             client = self.clients[client_id]
-            self._bind_resolved_client_modality(client_id)
+            resolved_modality = self._bind_resolved_client_modality(client_id)
             self._prepare_client_for_round(client)
+            self._align_client_model_layout(client, resolved_modality)
             client.set_global_blueprint(blueprint)
             update_results[client_id] = client.local_train_student(getattr(client.args, "E", 1))
             update_sizes[client_id] = len(client.training_set)
