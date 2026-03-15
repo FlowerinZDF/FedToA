@@ -129,7 +129,11 @@ class FedtoaServer(FedavgServer):
         return update_sizes
 
     def update(self):
-        selected_ids = self._sample_clients()
+        # ``equal_sampled`` can yield duplicated IDs when users pass repeated
+        # dataset names (e.g., modality partitions of the same dataset). FedToA
+        # orchestration is role-based per client, so deduplicate before
+        # teacher/student splitting.
+        selected_ids = sorted(set(self._sample_clients()))
         teacher_ids = self._teacher_client_ids(selected_ids)
         student_ids = self._student_client_ids(selected_ids, teacher_ids)
 

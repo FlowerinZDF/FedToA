@@ -26,9 +26,9 @@ python main.py \
   --algorithm fedtoa \
   --seed 1 \
   --multi-task \
-  --datasets Flickr30k Flickr30k Flickr30k \
-  --modalities img txt img+txt \
-  --data_paths ${root}data/flickr30k ${root}data/flickr30k ${root}data/flickr30k \
+  --datasets Flickr30k Flickr30k Flickr30k Flickr30k \
+  --modalities img txt img+txt img+txt \
+  --data_paths ${root}data/flickr30k ${root}data/flickr30k ${root}data/flickr30k ${root}data/flickr30k \
   --Ks $ic $tc $mc \
   --Cs $c \
   --test_size -1 \
