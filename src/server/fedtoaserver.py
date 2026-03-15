@@ -112,10 +112,19 @@ class FedtoaServer(FedavgServer):
                 elif self.round > (self.args.freeze_rounds + self.args.warmup_rounds):
                     self._unfreeze_params(client)
 
+    def _bind_resolved_client_modality(self, client_id: int) -> Optional[str]:
+        """Bind the server-resolved modality onto the live client instance."""
+
+        resolved_modality = self._resolve_client_modality(client_id)
+        if resolved_modality is not None:
+            self.clients[client_id].modality = resolved_modality
+        return resolved_modality
+
     def _collect_teacher_payloads(self, teacher_ids: List[int]):
         payloads = []
         for client_id in teacher_ids:
             client = self.clients[client_id]
+            self._bind_resolved_client_modality(client_id)
             self._prepare_client_for_round(client)
             payload = client.extract_teacher_topology()
             payloads.append(payload)
@@ -162,6 +171,7 @@ class FedtoaServer(FedavgServer):
 
         for client_id in student_ids:
             client = self.clients[client_id]
+            self._bind_resolved_client_modality(client_id)
             self._prepare_client_for_round(client)
             client.set_global_blueprint(blueprint)
             update_results[client_id] = client.local_train_student(getattr(client.args, "E", 1))
