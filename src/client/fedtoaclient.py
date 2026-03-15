@@ -432,6 +432,21 @@ class FedtoaClient(FedavgClient):
             "lip_loss": float(last_metrics.get("lip_loss", 0.0)),
             "total_loss": loss_value,
         }
+        logger.info(
+            "[FEDTOA][TRAIN_METRICS] client=%s round=%s task_loss=%.6f topo_loss_used=%.6f scaled_topo_term=%.6f spec_loss=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f prompt_only=%s freeze_backbone=%s",
+            self.id,
+            int(getattr(self.args, "fedtoa_comm_round", 0)),
+            metric_payload["task_loss"],
+            metric_payload["topo_loss_used"],
+            metric_payload["scaled_topo_term"],
+            metric_payload["spec_loss"],
+            metric_payload["lip_loss"],
+            metric_payload["active_edge_count"],
+            metric_payload["effective_beta_topo"],
+            prompt_only,
+            bool(getattr(self.args, "freeze_backbone", True)),
+        )
+
         result_payload = {
             final_epoch: {
                 "loss": loss_value,
