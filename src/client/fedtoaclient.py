@@ -117,17 +117,24 @@ class FedtoaClient(FedavgClient):
 
         return prompt_params
 
+    @staticmethod
+    def _zero_like_optional(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if tensor is None or not torch.is_tensor(tensor):
+            return None
+        return torch.zeros_like(tensor)
+
     def _student_forward(self, batch):
         targets: Optional[torch.Tensor] = None
-        paired_inputs: Optional[torch.Tensor] = None
+        dummy_missing_inputs: Optional[torch.Tensor] = None
 
         if isinstance(batch, (tuple, list)):
             if self.modality == "img":
                 inputs = batch[0]
                 if len(batch) >= 2 and torch.is_tensor(batch[1]) and batch[1].ndim > 1 and batch[1].shape[0] == inputs.shape[0]:
-                    # Retrieval-style batch carries (image, text, ...): keep paired
-                    # text to satisfy models expecting two concrete modality inputs.
-                    paired_inputs = batch[1]
+                    # Retrieval-style batches carry paired modality tensors. FedToA
+                    # student adaptation must stay in missing-modality mode, so use a
+                    # placeholder instead of the real paired modality.
+                    dummy_missing_inputs = self._zero_like_optional(batch[1])
                 if len(batch) >= 2:
                     candidate = self._as_group_ids(batch[1], batch_size=inputs.shape[0], device=self.device)
                     targets = candidate
@@ -136,7 +143,7 @@ class FedtoaClient(FedavgClient):
                 # text-only batches are commonly (text, labels).
                 use_retrieval_layout = len(batch) >= 2 and torch.is_tensor(batch[1]) and batch[1].ndim > 1
                 if use_retrieval_layout:
-                    paired_inputs = batch[0]
+                    dummy_missing_inputs = self._zero_like_optional(batch[0])
                     inputs = batch[1]
                 else:
                     inputs = batch[0]
@@ -151,8 +158,8 @@ class FedtoaClient(FedavgClient):
         if self.modality == "img":
             inputs = inputs.to(self.device)
             model_inputs = [inputs, None]
-            if paired_inputs is not None:
-                model_inputs[1] = paired_inputs.to(self.device)
+            if dummy_missing_inputs is not None:
+                model_inputs[1] = dummy_missing_inputs.to(self.device)
             if targets is not None:
                 targets = targets.to(self.device)
             logits = self.model(model_inputs)[0]
@@ -162,8 +169,8 @@ class FedtoaClient(FedavgClient):
         if self.modality == "txt":
             inputs = inputs.to(self.device)
             model_inputs = [None, inputs]
-            if paired_inputs is not None:
-                model_inputs[0] = paired_inputs.to(self.device)
+            if dummy_missing_inputs is not None:
+                model_inputs[0] = dummy_missing_inputs.to(self.device)
             if targets is not None:
                 targets = targets.to(self.device)
             logits = self.model(model_inputs)[1]
@@ -375,8 +382,29 @@ class FedtoaClient(FedavgClient):
                     "total_loss": float(total_loss.detach().cpu()),
                 }
 
+        final_epoch = int(getattr(self.args, "E", epochs))
+        loss_value = float(last_metrics.get("total_loss", 0.0))
+        metric_payload = {
+            "task_loss": float(last_metrics.get("task_loss", 0.0)),
+            "topo_loss": float(last_metrics.get("topo_loss", 0.0)),
+            "spec_loss": float(last_metrics.get("spec_loss", 0.0)),
+            "lip_loss": float(last_metrics.get("lip_loss", 0.0)),
+            "total_loss": loss_value,
+        }
+        result_payload = {
+            final_epoch: {
+                "loss": loss_value,
+                "task_loss": metric_payload["task_loss"],
+                "topo_loss": metric_payload["topo_loss"],
+                "spec_loss": metric_payload["spec_loss"],
+                "lip_loss": metric_payload["lip_loss"],
+                "total_loss": metric_payload["total_loss"],
+                "metrics": metric_payload,
+            }
+        }
+
         self.model.to("cpu")
-        return last_metrics
+        return result_payload
 
     def update(self):
         return self.local_train_student(getattr(self.args, "E", 1))

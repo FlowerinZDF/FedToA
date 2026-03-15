@@ -113,6 +113,26 @@ class TinyPromptTextModel(nn.Module):
         return [None, self.head(feats)]
 
 
+class TinyPromptModelWithMissingCheck(TinyPromptModel):
+    def __init__(self):
+        super().__init__()
+        self.last_missing = None
+
+    def forward(self, x, feat_out=False):
+        self.last_missing = x[1]
+        return super().forward(x, feat_out=feat_out)
+
+
+class TinyPromptTextModelWithMissingCheck(TinyPromptTextModel):
+    def __init__(self):
+        super().__init__()
+        self.last_missing = None
+
+    def forward(self, x, feat_out=False):
+        self.last_missing = x[0]
+        return super().forward(x, feat_out=feat_out)
+
+
 class TinyMMPromptModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -159,8 +179,11 @@ def test_local_train_student_updates_prompt_only():
     prompt_before = client.model.prompt.detach().clone()
 
     metrics = client.local_train_student(epochs=2)
+    epoch_key = 2
 
-    assert "total_loss" in metrics
+    assert epoch_key in metrics
+    assert "total_loss" in metrics[epoch_key]
+    assert "metrics" in metrics[epoch_key]
     assert torch.allclose(client.model.backbone.weight.detach(), backbone_before)
     assert not torch.allclose(client.model.prompt.detach(), prompt_before)
 
@@ -254,7 +277,7 @@ def test_local_train_student_img_retrieval_batch_zero_task_loss_warns_once():
     client = FedtoaClient(args=args, training_set=ds, test_set=ds, modality="img", task="img+txt", eval_metrics=[])
     client.id = 15
     client.device = "cpu"
-    client.model = TinyPromptModel()
+    client.model = TinyPromptModelWithMissingCheck()
 
     blueprint = GlobalTopologyBlueprint(
         topology_mean=torch.zeros(4, 4),
@@ -268,7 +291,8 @@ def test_local_train_student_img_retrieval_batch_zero_task_loss_warns_once():
         metrics = client.local_train_student(epochs=2)
 
     assert len(caught) == 1
-    assert metrics["task_loss"] == 0.0
+    assert metrics[2]["task_loss"] == 0.0
+    assert torch.allclose(client.model.last_missing, torch.zeros_like(txt_feats[:2]))
 
 
 def test_local_train_student_txt_retrieval_batch_uses_text_field():
@@ -296,7 +320,7 @@ def test_local_train_student_txt_retrieval_batch_uses_text_field():
     client = FedtoaClient(args=args, training_set=ds, test_set=ds, modality="txt", task="img+txt", eval_metrics=[])
     client.id = 16
     client.device = "cpu"
-    client.model = TinyPromptTextModel()
+    client.model = TinyPromptTextModelWithMissingCheck()
 
     blueprint = GlobalTopologyBlueprint(
         topology_mean=torch.zeros(4, 4),
@@ -309,5 +333,6 @@ def test_local_train_student_txt_retrieval_batch_uses_text_field():
     with pytest.warns(RuntimeWarning, match="task targets unavailable"):
         metrics = client.local_train_student(epochs=1)
 
-    assert metrics["task_loss"] == 0.0
-    assert "total_loss" in metrics
+    assert metrics[1]["task_loss"] == 0.0
+    assert "total_loss" in metrics[1]
+    assert torch.allclose(client.model.last_missing, torch.zeros_like(img_feats[:2]))
