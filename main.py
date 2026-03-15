@@ -11,6 +11,15 @@ from importlib import import_module
 
 from src import Range, set_logger, TensorBoardRunner, check_args, set_seed, load_dataset, load_model, load_datasets
 
+
+def _add_bool_optional_arg(parser, name, default=True, help_text=""):
+    """Python 3.8-compatible replacement for argparse.BooleanOptionalAction."""
+    dest = name.lstrip("-").replace("-", "_")
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument(name, dest=dest, action='store_true', help=help_text)
+    group.add_argument(f"--no-{dest}", dest=dest, action='store_false', help=f"disable: {help_text}" if help_text else None)
+    parser.set_defaults(**{dest: default})
+
 # Uncomment this if there is deadlock in DataLoader
 # torch.set_num_threads(16)
 
@@ -213,9 +222,9 @@ if __name__ == "__main__":
     ########################
     # FedToA arguments    #
     ########################
-    parser.add_argument('--use_topo', help='enable FedToA topology alignment term', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--use_spec', help='enable FedToA spectral consistency term', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--use_lip', help='enable FedToA prompt Lipschitz regularization term', action=argparse.BooleanOptionalAction, default=True)
+    _add_bool_optional_arg(parser, '--use_topo', default=True, help_text='enable FedToA topology alignment term')
+    _add_bool_optional_arg(parser, '--use_spec', default=True, help_text='enable FedToA spectral consistency term')
+    _add_bool_optional_arg(parser, '--use_lip', default=True, help_text='enable FedToA prompt Lipschitz regularization term')
     parser.add_argument('--tau', type=float, default=0.2, help='temperature for class-topology affinity in FedToA')
     parser.add_argument('--eig_k', type=int, default=4, help='number of non-trivial Laplacian eigenvalues for FedToA spectral summaries')
     parser.add_argument('--topk_edges', type=int, default=None, help='number of global topology edges retained by FedToA confidence masking')

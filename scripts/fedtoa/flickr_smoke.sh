@@ -1,8 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export OMP_NUM_THREADS=1
+
 goal=FedToA-Smoke
 
-# Small/fast smoke setup:
-# - 4 total FL clients in this run: 1 img-only, 1 txt-only, 2 multimodal
-# - short schedule to validate end-to-end FedToA runtime path
+# Flickr30k-only minimal smoke setup:
+# - 4 total FL clients: 1 img-only, 1 txt-only, 2 multimodal
+# - short schedule to validate FedToA startup and one aggregation loop
 ic=1
 tc=1
 mc=2
@@ -21,9 +26,9 @@ python main.py \
   --algorithm fedtoa \
   --seed 1 \
   --multi-task \
-  --datasets CIFAR100 AG_NEWS Flickr30k Flickr30k \
-  --modalities img txt img+txt img+txt \
-  --data_paths ${root}data/cifar100 ${root}data/agnews ${root}data/flickr30k ${root}data/flickr30k \
+  --datasets Flickr30k Flickr30k Flickr30k \
+  --modalities img txt img+txt \
+  --data_paths ${root}data/flickr30k ${root}data/flickr30k ${root}data/flickr30k \
   --Ks $ic $tc $mc \
   --Cs $c \
   --test_size -1 \
@@ -53,4 +58,7 @@ python main.py \
   --reduce_samples 64 \
   --reduce_test_samples 32 \
   --eval_batch_size 64 \
-  --fedavg_eval
+  --fedavg_eval \
+  --use_topo \
+  --use_spec \
+  --use_lip
