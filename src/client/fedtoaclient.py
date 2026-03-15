@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple
+import warnings
 
 import torch
 import torch.nn as nn
@@ -32,6 +33,7 @@ class FedtoaClient(FedavgClient):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.global_blueprint: Optional[GlobalTopologyBlueprint] = None
+        self._fedtoa_warned_missing_task_target = False
 
     def _num_classes(self) -> int:
         if self.global_blueprint is not None:
@@ -116,16 +118,42 @@ class FedtoaClient(FedavgClient):
         return prompt_params
 
     def _student_forward(self, batch):
+        targets: Optional[torch.Tensor] = None
+
+        if isinstance(batch, (tuple, list)):
+            if self.modality == "img":
+                inputs = batch[0]
+                if len(batch) >= 2:
+                    candidate = self._as_group_ids(batch[1], batch_size=inputs.shape[0], device=self.device)
+                    targets = candidate
+            elif self.modality == "txt":
+                # Retrieval batches are typically (image, text, ...), while classification
+                # text-only batches are commonly (text, labels).
+                use_retrieval_layout = len(batch) >= 2 and torch.is_tensor(batch[1]) and batch[1].ndim > 1
+                if use_retrieval_layout:
+                    inputs = batch[1]
+                else:
+                    inputs = batch[0]
+                    if len(batch) >= 2:
+                        candidate = self._as_group_ids(batch[1], batch_size=inputs.shape[0], device=self.device)
+                        targets = candidate
+            else:
+                raise ValueError("FedToA student local adaptation currently supports img or txt modality only.")
+        else:
+            inputs = batch
+
         if self.modality == "img":
-            inputs, targets = batch
-            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            inputs = inputs.to(self.device)
+            if targets is not None:
+                targets = targets.to(self.device)
             logits = self.model([inputs, None])[0]
             feats = self.model([inputs, None], feat_out=True)[0]
             return logits, feats, targets
 
         if self.modality == "txt":
-            inputs, targets = batch
-            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            inputs = inputs.to(self.device)
+            if targets is not None:
+                targets = targets.to(self.device)
             logits = self.model([None, inputs])[1]
             feats = self.model([None, inputs], feat_out=True)[1]
             return logits, feats, targets
@@ -247,16 +275,36 @@ class FedtoaClient(FedavgClient):
 
         last_metrics = {}
         num_classes = self._num_classes()
+        fallback_group_offset = 0
 
         for _ in range(epochs):
             for batch in self.train_loader:
                 optimizer.zero_grad()
                 logits, feats, targets = self._student_forward(batch)
 
-                task_loss = criterion(logits.to(targets.device), targets)
+                if targets is None:
+                    task_loss = logits.new_tensor(0.0)
+                    if not self._fedtoa_warned_missing_task_target:
+                        warnings.warn(
+                            "FedToA student task targets unavailable in current batch; using zero task loss for smoke execution.",
+                            RuntimeWarning,
+                        )
+                        self._fedtoa_warned_missing_task_target = True
+                else:
+                    task_loss = criterion(logits.to(targets.device), targets)
+
                 topology_groups = self._resolve_topology_groups(batch, batch_size=feats.shape[0], device=feats.device)
                 if topology_groups is None:
-                    topology_groups = targets.to(dtype=torch.long)
+                    if targets is not None:
+                        topology_groups = targets.to(dtype=torch.long)
+                    else:
+                        topology_groups = torch.arange(
+                            fallback_group_offset,
+                            fallback_group_offset + feats.shape[0],
+                            device=feats.device,
+                            dtype=torch.long,
+                        )
+                        fallback_group_offset += feats.shape[0]
                 topology_groups = self._map_groups_to_table(topology_groups, num_classes)
 
                 local_proto, local_support = compute_class_prototypes(

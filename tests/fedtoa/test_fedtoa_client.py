@@ -3,6 +3,7 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 from torch.utils.data import TensorDataset
@@ -92,6 +93,24 @@ class TinyPromptModel(nn.Module):
             norm = feats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
             return [feats / norm, None]
         return [self.head(feats), None]
+
+
+
+
+class TinyPromptTextModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = nn.Linear(4, 4)
+        self.prompt = nn.Parameter(torch.zeros(4))
+        self.head = nn.Linear(4, 3)
+
+    def forward(self, x, feat_out=False):
+        txt = x[1]
+        feats = self.backbone(txt) + self.prompt.unsqueeze(0)
+        if feat_out:
+            norm = feats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            return [None, feats / norm]
+        return [None, self.head(feats)]
 
 
 class TinyMMPromptModel(nn.Module):
@@ -208,3 +227,87 @@ def test_extract_teacher_topology_retrieval_without_class_labels():
     assert payload.num_samples == 4
     assert payload.class_ids.tolist() == [1, 2]
     assert payload.support_mask.tolist() == [False, True, True, False]
+
+
+def test_local_train_student_img_retrieval_batch_zero_task_loss_warns_once():
+    _install_client_import_stubs()
+    from client.fedtoaclient import FedtoaClient
+
+    args = _build_args()
+    args.num_classes = None
+    args.fedtoa_group_count = 4
+
+    img_feats = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0], [0.8, 0.2, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.8, 0.2, 0.0]],
+        dtype=torch.float32,
+    )
+    txt_feats = torch.tensor(
+        [[0.9, 0.1, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.1, 0.9, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([9, 8, 7, 6], dtype=torch.long)
+    group_ids = torch.tensor([10, 10, 17, 17], dtype=torch.long)
+    ann_ids = torch.tensor([101, 102, 103, 104], dtype=torch.long)
+    indices = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    ds = TensorDataset(img_feats, txt_feats, labels, group_ids, ann_ids, indices)
+
+    client = FedtoaClient(args=args, training_set=ds, test_set=ds, modality="img", task="img+txt", eval_metrics=[])
+    client.id = 15
+    client.device = "cpu"
+    client.model = TinyPromptModel()
+
+    blueprint = GlobalTopologyBlueprint(
+        topology_mean=torch.zeros(4, 4),
+        topology_mask=torch.ones(4, 4, dtype=torch.bool),
+        spectral_global=torch.zeros(2),
+        active_classes=torch.tensor([True, True, True, True]),
+    )
+    client.set_global_blueprint(blueprint)
+
+    with pytest.warns(RuntimeWarning, match="task targets unavailable") as caught:
+        metrics = client.local_train_student(epochs=2)
+
+    assert len(caught) == 1
+    assert metrics["task_loss"] == 0.0
+
+
+def test_local_train_student_txt_retrieval_batch_uses_text_field():
+    _install_client_import_stubs()
+    from client.fedtoaclient import FedtoaClient
+
+    args = _build_args()
+    args.num_classes = None
+    args.fedtoa_group_count = 4
+
+    img_feats = torch.tensor(
+        [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+        dtype=torch.float32,
+    )
+    txt_feats = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0], [0.8, 0.2, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.8, 0.2, 0.0]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([9, 8, 7, 6], dtype=torch.long)
+    group_ids = torch.tensor([10, 10, 17, 17], dtype=torch.long)
+    ann_ids = torch.tensor([101, 102, 103, 104], dtype=torch.long)
+    indices = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    ds = TensorDataset(img_feats, txt_feats, labels, group_ids, ann_ids, indices)
+
+    client = FedtoaClient(args=args, training_set=ds, test_set=ds, modality="txt", task="img+txt", eval_metrics=[])
+    client.id = 16
+    client.device = "cpu"
+    client.model = TinyPromptTextModel()
+
+    blueprint = GlobalTopologyBlueprint(
+        topology_mean=torch.zeros(4, 4),
+        topology_mask=torch.ones(4, 4, dtype=torch.bool),
+        spectral_global=torch.zeros(2),
+        active_classes=torch.tensor([True, True, True, True]),
+    )
+    client.set_global_blueprint(blueprint)
+
+    with pytest.warns(RuntimeWarning, match="task targets unavailable"):
+        metrics = client.local_train_student(epochs=1)
+
+    assert metrics["task_loss"] == 0.0
+    assert "total_loss" in metrics
