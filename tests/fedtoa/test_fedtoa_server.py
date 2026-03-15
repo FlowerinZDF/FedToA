@@ -79,6 +79,9 @@ class FakeFedtoaClient:
         self.student_updates += 1
         return {"epochs": epochs, "loss": 0.123}
 
+    def upload(self):
+        return {"prompt": torch.zeros(2, dtype=torch.float32)}
+
 
 def _toy_payload(client_id):
     return TeacherTopologyPayload(
