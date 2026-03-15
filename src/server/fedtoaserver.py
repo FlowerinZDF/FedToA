@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 from copy import deepcopy
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -34,6 +34,55 @@ class FedtoaServer(FedavgServer):
         super().__init__(args, writer, server_dataset, client_datasets, model_str)
         self.latest_blueprint = None
 
+    def _modality_from_layout(self, client_id: int) -> Optional[str]:
+        """Resolve client modality from ``args.modalities``/``args.Ks`` layout.
+
+        ``load_datasets`` creates clients in task-order blocks, so this fallback
+        can recover the intended per-client modality for smoke/debug settings.
+        """
+
+        if not getattr(self.args, "multi_task", False):
+            return None
+        modalities = getattr(self.args, "modalities", None)
+        if not modalities:
+            return None
+
+        ks = getattr(self.args, "Ks", None)
+        if not ks:
+            return None
+
+        num_client_groups = max(len(modalities) - 1, 0)
+        if num_client_groups == 0:
+            return None
+
+        if len(ks) == 1:
+            ks = [int(ks[0])] * num_client_groups
+        else:
+            ks = [int(v) for v in ks[:num_client_groups]]
+
+        start = 0
+        for group_idx, group_size in enumerate(ks):
+            end = start + group_size
+            if start <= client_id < end:
+                return modalities[group_idx]
+            start = end
+        return None
+
+    def _resolve_client_modality(self, client_id: int) -> Optional[str]:
+        client = self.clients[client_id]
+        client_modality = getattr(client, "modality", None)
+        configured_modality = self._modality_from_layout(client_id)
+
+        if configured_modality is not None and client_modality != configured_modality:
+            logger.warning(
+                "[FEDTOA][ROLE] modality mismatch for client %s: client.modality=%s configured=%s; using configured value.",
+                client_id,
+                client_modality,
+                configured_modality,
+            )
+            return configured_modality
+        return configured_modality or client_modality
+
     def _teacher_client_ids(self, selected_ids: List[int]) -> List[int]:
         configured_ids = getattr(self.args, "fedtoa_teacher_ids", None)
         if configured_ids is not None:
@@ -43,7 +92,7 @@ class FedtoaServer(FedavgServer):
         return [
             client_id
             for client_id in selected_ids
-            if getattr(self.clients[client_id], "modality", None) == "img+txt"
+            if self._resolve_client_modality(client_id) == "img+txt"
         ]
 
     def _student_client_ids(self, selected_ids: List[int], teacher_ids: List[int]) -> List[int]:
@@ -142,6 +191,18 @@ class FedtoaServer(FedavgServer):
             "teachers": teacher_ids,
             "students": student_ids,
         }
+
+        role_tokens = []
+        teacher_set = set(teacher_ids)
+        for client_id in selected_ids:
+            resolved_modality = self._resolve_client_modality(client_id)
+            role = "teacher" if client_id in teacher_set else "student"
+            role_tokens.append(f"{client_id}:{resolved_modality}:{role}")
+        logger.info(
+            "[FEDTOA] Round %s selected clients => %s",
+            str(self.round).zfill(4),
+            ", ".join(role_tokens) if role_tokens else "none",
+        )
 
         blueprint = None
         if len(teacher_ids) > 0 and len(student_ids) > 0:
