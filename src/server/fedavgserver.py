@@ -30,6 +30,16 @@ import re
 
 logger = logging.getLogger(__name__)
 
+
+class _NoOpWriter:
+    """Writer shim used when wandb is unavailable/disabled."""
+
+    def log(self, *args, **kwargs):
+        return None
+
+    def finish(self):
+        return None
+
 DATASET_2_TASK = {
     'BraTS': 'seg',
     'MedMNIST': 'cls',
@@ -118,7 +128,7 @@ class FedavgServer(BaseServer):
     def __init__(self, args, writer, server_dataset, client_datasets, model_str):
         super(FedavgServer, self).__init__()
         self.args = args
-        self.writer = writer
+        self.writer = writer if writer is not None else _NoOpWriter()
 
         self.round = 0 # round indicator
         if self.args.eval_type != 'local': # global holdout set for central evaluation

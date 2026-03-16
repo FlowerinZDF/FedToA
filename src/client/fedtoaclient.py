@@ -90,21 +90,42 @@ class FedtoaClient(FedavgClient):
             return (tokens,)
         return tuple(tokens)
 
+    @staticmethod
+    def _normalize_name_tokens(tokens: Tuple[str, ...]) -> Tuple[str, ...]:
+        normalized = []
+        for token in tokens:
+            t = str(token).strip()
+            if not t:
+                continue
+            normalized.append(t.lower())
+            normalized.append(t.replace("_", "").lower())
+        return tuple(dict.fromkeys(normalized))
+
+    @staticmethod
+    def _param_matches_prompt_tokens(name: str, normalized_tokens: Tuple[str, ...]) -> bool:
+        lower_name = name.lower()
+        compact_name = lower_name.replace("_", "")
+        return any(token in lower_name or token in compact_name for token in normalized_tokens)
+
     def _configure_trainable_params(self) -> List[torch.nn.Parameter]:
         freeze_backbone = bool(getattr(self.args, "freeze_backbone", True))
         prompt_only = bool(getattr(self.args, "fedtoa_prompt_only", True))
         prompt_tokens = self._prompt_name_tokens()
+        normalized_prompt_tokens = self._normalize_name_tokens(prompt_tokens)
 
         if freeze_backbone or prompt_only:
             for param in self.model.parameters():
                 param.requires_grad = False
 
         prompt_params: List[torch.nn.Parameter] = []
+        matched_prompt_names: List[str] = []
         for name, param in self.model.named_parameters():
-            if any(token in name for token in prompt_tokens):
+            if self._param_matches_prompt_tokens(name, normalized_prompt_tokens):
                 param.requires_grad = True
                 prompt_params.append(param)
+                matched_prompt_names.append(name)
 
+        used_fallback = False
         if len(prompt_params) == 0:
             if not hasattr(self.model, "_fedtoa_prompt_fallback"):
                 self.model.register_parameter(
@@ -114,14 +135,24 @@ class FedtoaClient(FedavgClient):
             fallback = getattr(self.model, "_fedtoa_prompt_fallback")
             fallback.requires_grad = True
             prompt_params.append(fallback)
+            used_fallback = True
 
         if not prompt_only:
             for _, param in self.model.named_parameters():
                 if not (freeze_backbone and not param.requires_grad):
                     param.requires_grad = True
 
-        self._fedtoa_prompt_trainable_names = tuple(
-            name for name, _ in self.model.named_parameters() if any(token in name for token in prompt_tokens)
+        self._fedtoa_prompt_trainable_names = tuple(matched_prompt_names)
+        self._fedtoa_prompt_used_fallback = used_fallback
+        self._fedtoa_prompt_tokens = tuple(prompt_tokens)
+
+        logger.info(
+            "[FEDTOA][PROMPT_MATCH] client=%s tokens=%s matched_count=%s matched_names=%s fallback_used=%s",
+            self.id,
+            list(prompt_tokens),
+            len(matched_prompt_names),
+            matched_prompt_names,
+            used_fallback,
         )
 
         return prompt_params
@@ -364,20 +395,35 @@ class FedtoaClient(FedavgClient):
 
                 active_classes = self.global_blueprint.active_classes.to(self.device).to(dtype=torch.bool)
                 support_mask = local_support & active_classes
+                blueprint_mask = self.global_blueprint.topology_mask.to(self.device).to(dtype=torch.bool)
 
                 topo_loss = task_loss.new_tensor(0.0)
                 active_edge_count = 0
                 if use_topo:
                     valid_edges = (
-                        self.global_blueprint.topology_mask.to(self.device).to(dtype=torch.bool)
+                        blueprint_mask
                         & support_mask.unsqueeze(0)
                         & support_mask.unsqueeze(1)
                     )
                     active_edge_count = int(valid_edges.sum().item())
+                    if active_edge_count == 0:
+                        logger.info(
+                            "[FEDTOA][ACTIVE_EDGE_DEBUG] client=%s round=%s local_topology_shape=%s support_mask_shape=%s blueprint_shape=%s local_group_count=%s local_class_count=%s support_true=%s active_classes_true=%s blueprint_true=%s",
+                            self.id,
+                            int(getattr(self.args, "fedtoa_comm_round", 0)),
+                            tuple(local_topology.shape),
+                            tuple(support_mask.shape),
+                            tuple(blueprint_mask.shape),
+                            int(torch.unique(topology_groups).numel()),
+                            int(local_support.sum().item()),
+                            int(support_mask.sum().item()),
+                            int(active_classes.sum().item()),
+                            int(blueprint_mask.sum().item()),
+                        )
                     topo_loss = masked_topology_loss(
                         local_topology=local_topology,
                         global_topology=self.global_blueprint.topology_mean.to(self.device),
-                        edge_mask=self.global_blueprint.topology_mask.to(self.device),
+                        edge_mask=blueprint_mask,
                         class_support_mask=support_mask,
                     )
 
@@ -477,8 +523,9 @@ class FedtoaClient(FedavgClient):
             return sd
 
         prompt_tokens = self._prompt_name_tokens()
+        normalized_prompt_tokens = self._normalize_name_tokens(prompt_tokens)
         for key in sd.keys():
-            if any(token in key for token in prompt_tokens):
+            if self._param_matches_prompt_tokens(key, normalized_prompt_tokens):
                 continue
             if key in self._fedtoa_upload_base_state:
                 sd[key] = self._fedtoa_upload_base_state[key].clone()
