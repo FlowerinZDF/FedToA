@@ -42,7 +42,8 @@ echo "[PRECHECK] dataset/algorithm/script identity: MS-COCO / fedtoa / coco_shor
 
 python main.py \
   --exp_name FedToA \
-  --output_path "$out_dir" \
+  --result_path "$out_dir" \
+  --log_path "$(dirname "$log_file")" \
   --shared_param attn \
   --share_scope modality \
   --colearn_param none \

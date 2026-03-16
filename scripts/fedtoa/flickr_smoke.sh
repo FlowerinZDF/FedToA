@@ -23,11 +23,11 @@ local_epochs="${LOCAL_EPOCHS:-1}"
 reduce_samples="${REDUCE_SAMPLES:-64}"
 reduce_test_samples="${REDUCE_TEST_SAMPLES:-32}"
 
-beta_topo="${BETA_TOPO:-1.0}"
+beta_topo="${BETA_TOPO:-1e-3}"
 gamma_spec="${GAMMA_SPEC:-1.0}"
 eta_lip="${ETA_LIP:-1.0}"
 warmup_rounds="${WARMUP_ROUNDS:-2}"
-warmup_start_beta="${WARMUP_START_BETA:-0.05}"
+warmup_start_beta="${WARMUP_START_BETA:-1e-4}"
 warmup_mode="${WARMUP_MODE:-linear}"
 topk_edges="${TOPK_EDGES:-64}"
 var_threshold="${FEDTOA_VAR_THRESHOLD:-none}"
@@ -44,7 +44,8 @@ echo "[PRECHECK] estimated communication header will be emitted by FedToA server
 
 python main.py \
   --exp_name FedToA_Flickr_Smoke \
-  --output_path "$out_dir" \
+  --result_path "$out_dir" \
+  --log_path "$(dirname "$log_file")" \
   --shared_param none \
   --share_scope dataset \
   --colearn_param none \

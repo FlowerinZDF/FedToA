@@ -85,7 +85,8 @@ echo "[RUN_CONFIG] output_dir=${out_root}" | tee -a "$base_log"
 echo "[RUN_CONFIG] log_file=${base_log}" | tee -a "$base_log"
 python main.py \
   --exp_name FedCola \
-  --output_path "$out_root" \
+  --result_path "$out_root" \
+  --log_path "$log_root" \
   --shared_param attn \
   --share_scope modality \
   --colearn_param none \
@@ -128,7 +129,8 @@ python main.py \
 
 python main.py \
   --exp_name FedToA \
-  --output_path "$out_root" \
+  --result_path "$out_root" \
+  --log_path "$log_root" \
   --shared_param attn \
   --share_scope modality \
   --colearn_param none \
