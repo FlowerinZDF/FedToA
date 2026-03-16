@@ -17,7 +17,7 @@ mc="${MC:-2}"
 cncntrtn="${CNCNTRTN:-0.5}"
 c="${C_RATIO:-1.0}"
 nt="${NUM_THREAD:-2}"
-b="${BATCH_SIZE:-8}"
+b="${BATCH_SIZE:-32}"
 rounds="${ROUNDS:-2}"
 local_epochs="${LOCAL_EPOCHS:-1}"
 reduce_samples="${REDUCE_SAMPLES:-64}"
@@ -77,13 +77,17 @@ python main.py \
   --lr_decay_step 1 \
   --criterion CrossEntropyLoss \
   --num_thread "$nt" \
+  --loader_num_workers "${LOADER_NUM_WORKERS:-6}" \
+  --loader_pin_memory \
+  --loader_persistent_workers \
+  --loader_prefetch_factor "${LOADER_PREFETCH_FACTOR:-4}" \
   --use_bert_tokenizer \
   --pretrained \
   --goal "$goal" \
   --equal_sampled \
   --reduce_samples "$reduce_samples" \
   --reduce_test_samples "$reduce_test_samples" \
-  --eval_batch_size 64 \
+  --eval_batch_size 256 \
   --fedavg_eval \
   --fedtoa_prompt_only \
   --freeze_backbone \

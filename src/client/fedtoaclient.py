@@ -575,6 +575,7 @@ class FedtoaClient(FedavgClient):
         use_spec = bool(getattr(self.args, "use_spec", True))
         use_lip = bool(getattr(self.args, "use_lip", True))
         lip_enabled = use_lip and abs(eta) > 0.0
+        diagnostics_enabled = bool(getattr(self.args, "fedtoa_enable_diagnostics", False))
 
         last_metrics = {}
         num_classes = self._num_classes()
@@ -657,7 +658,7 @@ class FedtoaClient(FedavgClient):
                 else:
                     task_loss = criterion(logits.to(targets.device), targets)
                     selected_names = list(getattr(self, "_fedtoa_prompt_trainable_names", ()))
-                    if not task_connectivity_checked:
+                    if diagnostics_enabled and not task_connectivity_checked:
                         task_connectivity_nonzero = self._task_connected_nonzero_grad_names(
                             task_loss=task_loss,
                             selected_names=selected_names,
@@ -695,7 +696,7 @@ class FedtoaClient(FedavgClient):
                     valid_edges_no_diag = valid_edges.clone()
                     valid_edges_no_diag.fill_diagonal_(False)
                     active_edge_count = int(valid_edges_no_diag.sum().item())
-                    if not active_edge_debug_logged:
+                    if diagnostics_enabled and not active_edge_debug_logged:
                         support_mask_true_count = int(support_mask.sum().item())
                         support_true_indices = torch.nonzero(support_mask, as_tuple=False).flatten().tolist()
                         support_true_indices_sample = support_true_indices[:12]
@@ -780,7 +781,7 @@ class FedtoaClient(FedavgClient):
                     lip_loss=lip_loss,
                     total_loss=total_loss,
                 )
-                if not grad_path_logged:
+                if diagnostics_enabled and not grad_path_logged:
                     logger.info(
                         "[FEDTOA][GRAD_PATH] client=%s round=%s matched_names=%s task_requires_grad=%s topo_requires_grad=%s spec_requires_grad=%s lip_requires_grad=%s total_requires_grad=%s total_grad_fn=%s",
                         self.id,
@@ -796,11 +797,11 @@ class FedtoaClient(FedavgClient):
                     grad_path_logged = True
                 active_modality_index = 0 if self.modality == "img" else 1 if self.modality == "txt" else None
                 task_path_diag = {
-                    "task_connected_selected_nonzero": task_connectivity_nonzero,
+                    "task_connected_selected_nonzero": task_connectivity_nonzero if diagnostics_enabled else [],
                     "active_head_param_count": 0,
                     "active_head_selected": [],
                 }
-                if not task_path_logged:
+                if diagnostics_enabled and not task_path_logged:
                     task_path_diag = self._task_path_diagnostics(
                         task_loss=task_loss,
                         selected_names=list(getattr(self, "_fedtoa_prompt_trainable_names", ())),
@@ -842,7 +843,7 @@ class FedtoaClient(FedavgClient):
                     name for name, p in matched_named_params
                     if p.grad is not None and bool(torch.any(p.grad.detach() != 0))
                 ]
-                if not grad_after_backward_logged:
+                if diagnostics_enabled and not grad_after_backward_logged:
                     logger.info(
                         "[FEDTOA][GRAD_AFTER_BACKWARD] client=%s round=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
                         self.id,

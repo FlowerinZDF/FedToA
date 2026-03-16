@@ -713,7 +713,21 @@ class FedavgServer(BaseServer):
                 self.global_model = self.global_models[dataset]
                 self.evaluator.set_model(self.global_model)
                 server_dataset = self.server_dataset[dataset]
-                result = self.evaluator.evaluate(torch.utils.data.DataLoader(dataset=server_dataset, batch_size=self.args.eval_batch_size, shuffle=True, num_workers=4, persistent_workers=True), eval_batch_size=self.args.eval_batch_size)
+                _eval_workers = max(0, int(getattr(self.args, 'loader_num_workers', 0)))
+                _eval_pin = bool(getattr(self.args, 'loader_pin_memory', False)) and torch.cuda.is_available()
+                _eval_persistent = bool(getattr(self.args, 'loader_persistent_workers', False)) and _eval_workers > 0
+                _eval_prefetch = max(1, int(getattr(self.args, 'loader_prefetch_factor', 2)))
+                _eval_loader_kwargs = {
+                    'dataset': server_dataset,
+                    'batch_size': self.args.eval_batch_size,
+                    'shuffle': True,
+                    'num_workers': _eval_workers,
+                    'pin_memory': _eval_pin,
+                    'persistent_workers': _eval_persistent,
+                }
+                if _eval_workers > 0:
+                    _eval_loader_kwargs['prefetch_factor'] = _eval_prefetch
+                result = self.evaluator.evaluate(torch.utils.data.DataLoader(**_eval_loader_kwargs), eval_batch_size=self.args.eval_batch_size)
                 server_log_string = f'[{self.args.algorithm.upper()}] [{dataset.upper()}] [Round: {str(self.round).zfill(4)}] [EVALUATE] [SERVER] '
 
                 res_dict = {}
@@ -750,7 +764,21 @@ class FedavgServer(BaseServer):
                 self.global_model.to(self.args.server_device)
                 server_dataset = self.server_dataset[dataset]
 
-                for inputs, targets in torch.utils.data.DataLoader(dataset=server_dataset, batch_size=self.args.B, shuffle=False, num_workers=4, persistent_workers=True):
+                _cls_workers = max(0, int(getattr(self.args, 'loader_num_workers', 0)))
+                _cls_pin = bool(getattr(self.args, 'loader_pin_memory', False)) and torch.cuda.is_available()
+                _cls_persistent = bool(getattr(self.args, 'loader_persistent_workers', False)) and _cls_workers > 0
+                _cls_prefetch = max(1, int(getattr(self.args, 'loader_prefetch_factor', 2)))
+                _cls_loader_kwargs = {
+                    'dataset': server_dataset,
+                    'batch_size': max(1, int(getattr(self.args, 'eval_batch_size', self.args.B))),
+                    'shuffle': False,
+                    'num_workers': _cls_workers,
+                    'pin_memory': _cls_pin,
+                    'persistent_workers': _cls_persistent,
+                }
+                if _cls_workers > 0:
+                    _cls_loader_kwargs['prefetch_factor'] = _cls_prefetch
+                for inputs, targets in torch.utils.data.DataLoader(**_cls_loader_kwargs):
                     inputs, targets = inputs.to(self.args.server_device), targets.to(self.args.server_device)
 
                     if DATASET_2_MODALITY[dataset] == 'img':

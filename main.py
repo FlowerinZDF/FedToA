@@ -220,7 +220,12 @@ if __name__ == "__main__":
     parser.add_argument('--reduce_samples_cls_scale', help='reduce samples for classification.', type=float, default=-1)
 
     parser.add_argument('--num_thread', help='number of thread', type=int, default=1)
+    parser.add_argument('--loader_num_workers', help='number of DataLoader workers per process', type=int, default=4)
+    _add_bool_optional_arg(parser, '--loader_pin_memory', default=True, help_text='enable DataLoader pin_memory for host-to-device transfer')
+    _add_bool_optional_arg(parser, '--loader_persistent_workers', default=True, help_text='keep DataLoader workers persistent across epochs (requires num_workers > 0)')
+    parser.add_argument('--loader_prefetch_factor', help='DataLoader prefetch factor (valid only when num_workers > 0)', type=int, default=2)
     parser.add_argument('--num_transformer_layers', help='number of layers of the transformer', type=int, default=12)
+    _add_bool_optional_arg(parser, '--detect_anomaly', default=False, help_text='enable torch autograd anomaly detection (debug-only; slower)')
 
     ########################
     # Multi-modal arguments #
@@ -286,6 +291,7 @@ if __name__ == "__main__":
     parser.add_argument('--fedtoa_group_count', type=int, default=None, help='optional number of local groups/classes used to build FedToA topology')
     parser.add_argument('--fedtoa_var_threshold', type=float, default=None, help='optional edge variance threshold for FedToA confidence masking')
     _add_bool_optional_arg(parser, '--fedtoa_prompt_only', default=True, help_text='restrict FedToA student optimization to prompt/MASP params only')
+    _add_bool_optional_arg(parser, '--fedtoa_enable_diagnostics', default=False, help_text='enable expensive FedToA gradient/topology diagnostics logging')
     _add_bool_optional_arg(parser, '--freeze_backbone', default=True, help_text='freeze backbone params during FedToA student optimization')
     parser.add_argument('--fedtoa_prompt_param_names', type=str, nargs='+', default=['prompt'], help='name tokens used to select FedToA prompt/MASP parameters')
     parser.add_argument('--fedtoa_topo_warmup_rounds', type=int, default=5, help='communication rounds for beta_topo warmup; <=0 disables warmup')
@@ -373,7 +379,7 @@ if __name__ == "__main__":
     writer = _maybe_init_wandb(args, curr_time)
 
     # run main program
-    torch.autograd.set_detect_anomaly(True)
+    torch.autograd.set_detect_anomaly(bool(getattr(args, 'detect_anomaly', False)))
     # try:
     main(args, writer)
     sys.exit(0)

@@ -44,13 +44,23 @@ class FedavgClient(BaseClient):
     def _create_dataloader(self, dataset, shuffle, test=True):
         if self.args.B == 0 :
             self.args.B = len(self.training_set)
-        if not test:
-            if self.modality == 'img+txt':
-                return torch.utils.data.DataLoader(dataset=dataset, batch_size=self.args.B, shuffle=shuffle, persistent_workers=True, num_workers=8, pin_memory=True)
-            else:
-                return torch.utils.data.DataLoader(dataset=dataset, batch_size=self.args.B, shuffle=shuffle)
-        else:
-            return torch.utils.data.DataLoader(dataset=dataset, batch_size=self.args.B, shuffle=shuffle)
+        batch_size = self.args.B if not test else max(1, int(getattr(self.args, 'eval_batch_size', self.args.B)))
+        num_workers = max(0, int(getattr(self.args, 'loader_num_workers', 0)))
+        pin_memory = bool(getattr(self.args, 'loader_pin_memory', False)) and torch.cuda.is_available()
+        persistent_workers = bool(getattr(self.args, 'loader_persistent_workers', False)) and num_workers > 0
+        prefetch_factor = int(getattr(self.args, 'loader_prefetch_factor', 2))
+
+        kwargs = {
+            'dataset': dataset,
+            'batch_size': batch_size,
+            'shuffle': shuffle,
+            'num_workers': num_workers,
+            'pin_memory': pin_memory,
+            'persistent_workers': persistent_workers,
+        }
+        if num_workers > 0:
+            kwargs['prefetch_factor'] = max(1, prefetch_factor)
+        return torch.utils.data.DataLoader(**kwargs)
         
     def update(self):
         mm = MetricManager(self.eval_metrics) if self.modality!= 'img+txt' else MetricManager([])

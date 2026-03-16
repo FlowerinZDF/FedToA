@@ -17,7 +17,7 @@ mc="${MC:-8}"
 cncntrtn="${CNCNTRTN:-0.5}"
 c="${C_RATIO:-0.25}"
 nt="${NUM_THREAD:-8}"
-b="${BATCH_SIZE:-96}"
+b="${BATCH_SIZE:-112}"
 rounds="${ROUNDS:-3}"
 local_epochs="${LOCAL_EPOCHS:-1}"
 
@@ -77,6 +77,10 @@ python main.py \
   --lr_decay_step 1 \
   --criterion CrossEntropyLoss \
   --num_thread "$nt" \
+  --loader_num_workers "${LOADER_NUM_WORKERS:-6}" \
+  --loader_pin_memory \
+  --loader_persistent_workers \
+  --loader_prefetch_factor "${LOADER_PREFETCH_FACTOR:-4}" \
   --use_bert_tokenizer \
   --pretrained \
   --goal "$goal" \
