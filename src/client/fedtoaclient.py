@@ -168,10 +168,14 @@ class FedtoaClient(FedavgClient):
                 or name.startswith(f"heads.{active_modality_index}.")
             )
 
+        named_params = list(self.model.named_parameters())
+        name_to_param = {name: param for name, param in named_params}
+
         prompt_params: List[torch.nn.Parameter] = []
         matched_prompt_names: List[str] = []
+        selection_reasons: Dict[str, str] = {}
         inactive_prompt_matches: List[str] = []
-        for name, param in self.model.named_parameters():
+        for name, param in named_params:
             if not self._param_matches_prompt_tokens(name, normalized_prompt_tokens):
                 continue
             if not _is_active_branch_param(name):
@@ -180,23 +184,52 @@ class FedtoaClient(FedavgClient):
             param.requires_grad = True
             prompt_params.append(param)
             matched_prompt_names.append(name)
+            selection_reasons[name] = "prompt_like"
 
         lightweight_fallback_names: List[str] = []
-        if len(prompt_params) == 0 and active_modality_index is not None:
-            for candidate_name in (
-                f"embeddings.{active_modality_index}.cls_token",
-                f"heads.{active_modality_index}.head.weight",
-                f"heads.{active_modality_index}.head.bias",
-                "norm.weight",
-                "norm.bias",
-            ):
-                param = dict(self.model.named_parameters()).get(candidate_name)
-                if param is None:
+        if active_modality_index is not None:
+            branch_prefixes = (
+                f"heads.{active_modality_index}.",
+                f"projections.{active_modality_index}.",
+                f"projectors.{active_modality_index}.",
+                f"embeddings.{active_modality_index}.",
+            )
+
+            def _add_candidates(candidates: List[str], reason: str) -> None:
+                for candidate_name in candidates:
+                    if candidate_name in set(matched_prompt_names):
+                        continue
+                    param = name_to_param.get(candidate_name)
+                    if param is None:
+                        continue
+                    param.requires_grad = True
+                    prompt_params.append(param)
+                    matched_prompt_names.append(candidate_name)
+                    lightweight_fallback_names.append(candidate_name)
+                    selection_reasons[candidate_name] = reason
+
+            branch_head_candidates = []
+            for name, _ in named_params:
+                if not _is_active_branch_param(name):
                     continue
-                param.requires_grad = True
-                prompt_params.append(param)
-                lightweight_fallback_names.append(candidate_name)
-                matched_prompt_names.append(candidate_name)
+                if any(name.startswith(prefix) for prefix in branch_prefixes):
+                    if name.endswith("weight") or name.endswith("bias"):
+                        branch_head_candidates.append(name)
+            branch_head_candidates = sorted(dict.fromkeys(branch_head_candidates))[:8]
+            _add_candidates(branch_head_candidates, reason="branch_head_projection")
+
+            norm_candidates = [name for name in ("norm.weight", "norm.bias") if name in name_to_param]
+            _add_candidates(norm_candidates, reason="norm_support")
+
+            cls_candidates = [
+                name
+                for name in (
+                    f"embeddings.{active_modality_index}.cls_token",
+                    f"embeddings.{active_modality_index}.reg_token",
+                )
+                if name in name_to_param
+            ]
+            _add_candidates(cls_candidates, reason="branch_token")
 
         used_fallback = False
         if len(prompt_params) == 0:
@@ -216,15 +249,17 @@ class FedtoaClient(FedavgClient):
                     param.requires_grad = True
 
         self._fedtoa_prompt_trainable_names = tuple(matched_prompt_names)
+        self._fedtoa_prompt_trainable_reasons = dict(selection_reasons)
         self._fedtoa_prompt_used_fallback = used_fallback
         self._fedtoa_prompt_tokens = tuple(prompt_tokens)
 
         logger.info(
-            "[FEDTOA][PROMPT_MATCH] client=%s configured_tokens=%s matched_count=%s matched_names=%s inactive_branch_matches=%s lightweight_fallback_names=%s fallback_used=%s",
+            "[FEDTOA][PROMPT_MATCH] client=%s configured_tokens=%s matched_count=%s matched_names=%s matched_reasons=%s inactive_branch_matches=%s lightweight_fallback_names=%s fallback_used=%s",
             self.id,
             list(prompt_tokens),
             len(matched_prompt_names),
             matched_prompt_names,
+            selection_reasons,
             inactive_prompt_matches,
             lightweight_fallback_names,
             used_fallback,
@@ -282,6 +317,38 @@ class FedtoaClient(FedavgClient):
         per_anchor = -(positive_mask.to(dtype=feats.dtype) * log_prob).sum(dim=1) / pos_counts
         return per_anchor[valid_anchor_mask].mean()
 
+    @staticmethod
+    def _task_fallback_loss(feats: torch.Tensor, group_ids: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        """Retrieval-oriented fallback student task objective.
+
+        Uses groupwise contrastive loss and, when possible, a light entropy term
+        on logits so active branch heads/projections remain task-connected.
+        """
+        contrastive = FedtoaClient._groupwise_contrastive_task_loss(feats=feats, group_ids=group_ids)
+        entropy_term = contrastive.new_tensor(0.0)
+        if torch.is_tensor(logits) and logits.ndim == 2 and logits.shape[0] > 0:
+            probs = torch.softmax(logits, dim=-1)
+            entropy = -(probs * torch.log(probs.clamp_min(1e-8))).sum(dim=-1).mean()
+            entropy_term = -0.01 * entropy
+        return contrastive + entropy_term
+
+    def _task_connected_nonzero_grad_names(self, task_loss: torch.Tensor, selected_names: List[str]) -> List[str]:
+        selected_lookup = {name: p for name, p in self.model.named_parameters() if name in set(selected_names)}
+        if not task_loss.requires_grad or len(selected_lookup) == 0:
+            return []
+        grad_inputs = [p for p in selected_lookup.values() if p.requires_grad]
+        grad_names = [n for n, p in selected_lookup.items() if p.requires_grad]
+        if len(grad_inputs) == 0:
+            return []
+        grads = torch.autograd.grad(task_loss, grad_inputs, retain_graph=True, allow_unused=True)
+        connected = []
+        for name, grad in zip(grad_names, grads):
+            if grad is None:
+                continue
+            if bool(torch.any(grad.detach() != 0)):
+                connected.append(name)
+        return connected
+
     def _task_path_diagnostics(self, task_loss: torch.Tensor, selected_names: List[str], active_modality_index: Optional[int]) -> Dict[str, object]:
         selected_lookup = {name: p for name, p in self.model.named_parameters() if name in set(selected_names)}
         selected_connected: List[str] = []
@@ -290,7 +357,10 @@ class FedtoaClient(FedavgClient):
             grad_names = [n for n, p in selected_lookup.items() if p.requires_grad]
             if len(grad_inputs) > 0:
                 grads = torch.autograd.grad(task_loss, grad_inputs, retain_graph=True, allow_unused=True)
-                selected_connected = [name for name, grad in zip(grad_names, grads) if grad is not None]
+                selected_connected = [
+                    name for name, grad in zip(grad_names, grads)
+                    if grad is not None and bool(torch.any(grad.detach() != 0))
+                ]
 
         active_head_prefix = None if active_modality_index is None else f"heads.{active_modality_index}."
         active_head_names = []
@@ -300,7 +370,7 @@ class FedtoaClient(FedavgClient):
             active_head_selected = [name for name in selected_names if name.startswith(active_head_prefix)]
 
         return {
-            "task_connected_selected": selected_connected,
+            "task_connected_selected_nonzero": selected_connected,
             "active_head_param_count": len(active_head_names),
             "active_head_selected": active_head_selected,
         }
@@ -535,16 +605,25 @@ class FedtoaClient(FedavgClient):
                 raw_topology_groups = topology_groups
                 topology_groups = self._map_groups_to_table(topology_groups, num_classes)
 
+                task_source = "supervised"
                 if targets is None:
-                    task_loss = self._groupwise_contrastive_task_loss(feats=feats, group_ids=topology_groups)
+                    task_loss = self._task_fallback_loss(feats=feats, group_ids=topology_groups, logits=logits)
+                    task_source = "fallback_missing_targets"
                     if not self._fedtoa_warned_missing_task_target:
                         warnings.warn(
-                            "FedToA student task targets unavailable in current batch; using group-wise contrastive fallback task loss.",
+                            "FedToA student task targets unavailable in current batch; using retrieval-oriented fallback task path.",
                             RuntimeWarning,
                         )
                         self._fedtoa_warned_missing_task_target = True
                 else:
                     task_loss = criterion(logits.to(targets.device), targets)
+                    selected_names = list(getattr(self, "_fedtoa_prompt_trainable_names", ()))
+                    task_connected_nonzero = self._task_connected_nonzero_grad_names(task_loss=task_loss, selected_names=selected_names)
+                    if len(task_connected_nonzero) == 0:
+                        task_loss = self._task_fallback_loss(feats=feats, group_ids=topology_groups, logits=logits)
+                        task_source = "fallback_disconnected_supervised"
+                    else:
+                        task_source = "supervised_connected"
 
                 local_proto, local_support = compute_class_prototypes(
                     feats,
@@ -613,12 +692,19 @@ class FedtoaClient(FedavgClient):
                             remap_applied,
                         )
                         active_edge_debug_logged = True
-                    topo_loss = masked_topology_loss(
-                        local_topology=local_topology,
-                        global_topology=self.global_blueprint.topology_mean.to(self.device),
-                        edge_mask=valid_edges_no_diag,
-                        class_support_mask=support_mask,
-                    )
+                    if active_edge_count > 0:
+                        topo_loss = masked_topology_loss(
+                            local_topology=local_topology,
+                            global_topology=self.global_blueprint.topology_mean.to(self.device),
+                            edge_mask=valid_edges_no_diag,
+                            class_support_mask=support_mask,
+                        )
+                    else:
+                        logger.info(
+                            "[FEDTOA][TOPO_SKIP] client=%s round=%s reason=no_active_edges topo_loss=0.0",
+                            self.id,
+                            int(getattr(self.args, "fedtoa_comm_round", 0)),
+                        )
 
                 spec_loss = task_loss.new_tensor(0.0)
                 if use_spec:
@@ -667,11 +753,12 @@ class FedtoaClient(FedavgClient):
                     active_modality_index=active_modality_index,
                 )
                 logger.info(
-                    "[FEDTOA][TASK_PATH] client=%s round=%s task_requires_grad=%s task_connected_selected=%s active_head_param_count=%s active_head_selected=%s",
+                    "[FEDTOA][TASK_PATH] client=%s round=%s task_source=%s task_requires_grad=%s task_connected_selected_nonzero=%s active_head_param_count=%s active_head_selected=%s",
                     self.id,
                     int(getattr(self.args, "fedtoa_comm_round", 0)),
+                    task_source,
                     grad_diag["task_loss_requires_grad"],
-                    task_path_diag["task_connected_selected"],
+                    task_path_diag["task_connected_selected_nonzero"],
                     task_path_diag["active_head_param_count"],
                     task_path_diag["active_head_selected"],
                 )
@@ -729,6 +816,8 @@ class FedtoaClient(FedavgClient):
                     "lip_loss_requires_grad": grad_diag["lip_loss_requires_grad"],
                     "matched_with_grad": matched_with_grad,
                     "matched_with_nonzero_grad": matched_with_nonzero_grad,
+                    "task_source": task_source,
+                    "task_connected_selected_nonzero": task_path_diag["task_connected_selected_nonzero"],
                 }
 
         final_epoch = int(getattr(self.args, "E", epochs))
@@ -750,11 +839,14 @@ class FedtoaClient(FedavgClient):
             "lip_loss_requires_grad": bool(last_metrics.get("lip_loss_requires_grad", False)),
             "matched_with_grad": list(last_metrics.get("matched_with_grad", [])),
             "matched_with_nonzero_grad": list(last_metrics.get("matched_with_nonzero_grad", [])),
+            "task_source": str(last_metrics.get("task_source", "unknown")),
+            "task_connected_selected_nonzero": list(last_metrics.get("task_connected_selected_nonzero", [])),
         }
         logger.info(
-            "[FEDTOA][TRAIN_METRICS] client=%s round=%s task_loss=%.6f topo_loss_used=%.6f scaled_topo_term=%.6f spec_loss=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
+            "[FEDTOA][TRAIN_METRICS] client=%s round=%s task_source=%s task_loss=%.6f topo_loss_used=%.6f scaled_topo_term=%.6f spec_loss=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
             self.id,
             int(getattr(self.args, "fedtoa_comm_round", 0)),
+            metric_payload["task_source"],
             metric_payload["task_loss"],
             metric_payload["topo_loss_used"],
             metric_payload["scaled_topo_term"],

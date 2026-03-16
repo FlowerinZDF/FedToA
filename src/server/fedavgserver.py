@@ -322,6 +322,20 @@ class FedavgServer(BaseServer):
         return sampled_client_ids
     
 
+    @staticmethod
+    def _format_metric_value_for_log(value):
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return f"{float(value):.4f}", float(value)
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                scalar = float(value.detach().cpu().item())
+                return f"{scalar:.4f}", scalar
+            safe = value.detach().cpu().tolist()
+            return str(safe), safe
+        if isinstance(value, (list, tuple, dict, str, bool)):
+            return str(value), value
+        return str(value), value
+
     def _log_results(self, resulting_sizes, results, eval, participated, save_raw):
         losses, metrics, num_samples = list(), defaultdict(list), list()
         log_dict = defaultdict(dict)
@@ -336,11 +350,12 @@ class FedavgServer(BaseServer):
                 
                 # metrics
                 for metric, value in result['metrics'].items():
-                    client_log_string += f'| {metric}: {value:.4f} '
-                    metrics[metric].append(value)
-
-                    log_dict['Train/'+ self.clients[identifier].modality+'_'+metric] = value
-                    averaged += value
+                    display_value, parsed_value = self._format_metric_value_for_log(value)
+                    client_log_string += f'| {metric}: {display_value} '
+                    if isinstance(parsed_value, (int, float)):
+                        metrics[metric].append(float(parsed_value))
+                        averaged += float(parsed_value)
+                    log_dict['Train/'+ self.clients[identifier].modality+'_'+metric] = parsed_value
             else: # same, but retireve results of last epoch's
                 # loss
                 loss = result[self.args.E]['loss']
@@ -349,8 +364,10 @@ class FedavgServer(BaseServer):
                 
                 # metrics
                 for name, value in result[self.args.E]['metrics'].items():
-                    client_log_string += f'| {name}: {value:.4f} '
-                    metrics[name].append(value)                
+                    display_value, parsed_value = self._format_metric_value_for_log(value)
+                    client_log_string += f'| {name}: {display_value} '
+                    if isinstance(parsed_value, (int, float)):
+                        metrics[name].append(float(parsed_value))
             # get sample size
             num_samples.append(resulting_sizes[identifier])
 
@@ -360,6 +377,8 @@ class FedavgServer(BaseServer):
             num_samples = np.array(num_samples).astype(float)
             
         for metric, value in metrics.items():
+            if len(value) == 0:
+                continue
             log_dict["Test" if eval else "Training" + f'/{metric}_Avg.'] = np.mean(value)
 
         log_dict["Test" if eval else "Training"+'/All_Avg.'] = averaged / self.args.K
