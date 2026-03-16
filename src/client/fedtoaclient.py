@@ -582,9 +582,24 @@ class FedtoaClient(FedavgClient):
         )
 
         active_edge_debug_logged = False
+        topo_skip_logged = False
+        grad_path_logged = False
+        task_path_logged = False
+        grad_after_backward_logged = False
+        task_connectivity_checked = False
+        task_connectivity_nonzero: List[str] = []
+        task_connectivity_use_fallback = False
 
-        for _ in range(epochs):
-            for batch in self.train_loader:
+        for epoch_idx in range(epochs):
+            for batch_idx, batch in enumerate(self.train_loader):
+                if batch_idx == 0:
+                    logger.info(
+                        "[FEDTOA][HEARTBEAT] client=%s round=%s epoch=%s/%s",
+                        self.id,
+                        int(getattr(self.args, "fedtoa_comm_round", 0)),
+                        epoch_idx + 1,
+                        epochs,
+                    )
                 optimizer.zero_grad()
                 logits, feats, targets = self._student_forward(batch)
 
@@ -618,8 +633,14 @@ class FedtoaClient(FedavgClient):
                 else:
                     task_loss = criterion(logits.to(targets.device), targets)
                     selected_names = list(getattr(self, "_fedtoa_prompt_trainable_names", ()))
-                    task_connected_nonzero = self._task_connected_nonzero_grad_names(task_loss=task_loss, selected_names=selected_names)
-                    if len(task_connected_nonzero) == 0:
+                    if not task_connectivity_checked:
+                        task_connectivity_nonzero = self._task_connected_nonzero_grad_names(
+                            task_loss=task_loss,
+                            selected_names=selected_names,
+                        )
+                        task_connectivity_use_fallback = len(task_connectivity_nonzero) == 0
+                        task_connectivity_checked = True
+                    if task_connectivity_use_fallback:
                         task_loss = self._task_fallback_loss(feats=feats, group_ids=topology_groups, logits=logits)
                         task_source = "fallback_disconnected_supervised"
                     else:
@@ -699,12 +720,13 @@ class FedtoaClient(FedavgClient):
                             edge_mask=valid_edges_no_diag,
                             class_support_mask=support_mask,
                         )
-                    else:
+                    elif not topo_skip_logged:
                         logger.info(
                             "[FEDTOA][TOPO_SKIP] client=%s round=%s reason=no_active_edges topo_loss=0.0",
                             self.id,
                             int(getattr(self.args, "fedtoa_comm_round", 0)),
                         )
+                        topo_skip_logged = True
 
                 spec_loss = task_loss.new_tensor(0.0)
                 if use_spec:
@@ -734,34 +756,43 @@ class FedtoaClient(FedavgClient):
                     lip_loss=lip_loss,
                     total_loss=total_loss,
                 )
-                logger.info(
-                    "[FEDTOA][GRAD_PATH] client=%s round=%s matched_names=%s task_requires_grad=%s topo_requires_grad=%s spec_requires_grad=%s lip_requires_grad=%s total_requires_grad=%s total_grad_fn=%s",
-                    self.id,
-                    int(getattr(self.args, "fedtoa_comm_round", 0)),
-                    list(getattr(self, "_fedtoa_prompt_trainable_names", ())),
-                    grad_diag["task_loss_requires_grad"],
-                    grad_diag["topo_loss_requires_grad"],
-                    grad_diag["spec_loss_requires_grad"],
-                    grad_diag["lip_loss_requires_grad"],
-                    grad_diag["total_loss_requires_grad"],
-                    grad_diag["total_loss_grad_fn"],
-                )
+                if not grad_path_logged:
+                    logger.info(
+                        "[FEDTOA][GRAD_PATH] client=%s round=%s matched_names=%s task_requires_grad=%s topo_requires_grad=%s spec_requires_grad=%s lip_requires_grad=%s total_requires_grad=%s total_grad_fn=%s",
+                        self.id,
+                        int(getattr(self.args, "fedtoa_comm_round", 0)),
+                        list(getattr(self, "_fedtoa_prompt_trainable_names", ())),
+                        grad_diag["task_loss_requires_grad"],
+                        grad_diag["topo_loss_requires_grad"],
+                        grad_diag["spec_loss_requires_grad"],
+                        grad_diag["lip_loss_requires_grad"],
+                        grad_diag["total_loss_requires_grad"],
+                        grad_diag["total_loss_grad_fn"],
+                    )
+                    grad_path_logged = True
                 active_modality_index = 0 if self.modality == "img" else 1 if self.modality == "txt" else None
-                task_path_diag = self._task_path_diagnostics(
-                    task_loss=task_loss,
-                    selected_names=list(getattr(self, "_fedtoa_prompt_trainable_names", ())),
-                    active_modality_index=active_modality_index,
-                )
-                logger.info(
-                    "[FEDTOA][TASK_PATH] client=%s round=%s task_source=%s task_requires_grad=%s task_connected_selected_nonzero=%s active_head_param_count=%s active_head_selected=%s",
-                    self.id,
-                    int(getattr(self.args, "fedtoa_comm_round", 0)),
-                    task_source,
-                    grad_diag["task_loss_requires_grad"],
-                    task_path_diag["task_connected_selected_nonzero"],
-                    task_path_diag["active_head_param_count"],
-                    task_path_diag["active_head_selected"],
-                )
+                task_path_diag = {
+                    "task_connected_selected_nonzero": task_connectivity_nonzero,
+                    "active_head_param_count": 0,
+                    "active_head_selected": [],
+                }
+                if not task_path_logged:
+                    task_path_diag = self._task_path_diagnostics(
+                        task_loss=task_loss,
+                        selected_names=list(getattr(self, "_fedtoa_prompt_trainable_names", ())),
+                        active_modality_index=active_modality_index,
+                    )
+                    logger.info(
+                        "[FEDTOA][TASK_PATH] client=%s round=%s task_source=%s task_requires_grad=%s task_connected_selected_nonzero=%s active_head_param_count=%s active_head_selected=%s",
+                        self.id,
+                        int(getattr(self.args, "fedtoa_comm_round", 0)),
+                        task_source,
+                        grad_diag["task_loss_requires_grad"],
+                        task_path_diag["task_connected_selected_nonzero"],
+                        task_path_diag["active_head_param_count"],
+                        task_path_diag["active_head_selected"],
+                    )
+                    task_path_logged = True
 
                 if not total_loss.requires_grad:
                     nonzero_losses = {
@@ -787,13 +818,15 @@ class FedtoaClient(FedavgClient):
                     name for name, p in matched_named_params
                     if p.grad is not None and bool(torch.any(p.grad.detach() != 0))
                 ]
-                logger.info(
-                    "[FEDTOA][GRAD_AFTER_BACKWARD] client=%s round=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
-                    self.id,
-                    int(getattr(self.args, "fedtoa_comm_round", 0)),
-                    matched_with_grad,
-                    matched_with_nonzero_grad,
-                )
+                if not grad_after_backward_logged:
+                    logger.info(
+                        "[FEDTOA][GRAD_AFTER_BACKWARD] client=%s round=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
+                        self.id,
+                        int(getattr(self.args, "fedtoa_comm_round", 0)),
+                        matched_with_grad,
+                        matched_with_nonzero_grad,
+                    )
+                    grad_after_backward_logged = True
 
                 if self.args.max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(trainable_params, self.args.max_grad_norm)
