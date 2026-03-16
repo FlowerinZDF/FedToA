@@ -74,18 +74,20 @@ class FedtoaClient(FedavgClient):
 
     def _resolve_topology_groups(self, batch, batch_size: int, device: torch.device):
         if not isinstance(batch, (tuple, list)):
-            return None
+            return None, "none"
 
         # Retrieval dataloaders expose semantic group/image ids as later fields.
         for idx in range(2, len(batch)):
             group_ids = self._as_group_ids(batch[idx], batch_size=batch_size, device=device)
             if group_ids is not None:
-                return group_ids
+                return group_ids, f"batch[{idx}]"
 
         # Supervised classification fallback: use labels as topology groups.
         if len(batch) >= 2:
-            return self._as_group_ids(batch[1], batch_size=batch_size, device=device)
-        return None
+            labels = self._as_group_ids(batch[1], batch_size=batch_size, device=device)
+            if labels is not None:
+                return labels, "batch[1]"
+        return None, "none"
 
     def _map_groups_to_table(self, group_ids: torch.Tensor, num_groups: int) -> torch.Tensor:
         group_ids = group_ids.abs().to(dtype=torch.long)
@@ -268,7 +270,7 @@ class FedtoaClient(FedavgClient):
                 x = x.to(self.device)
                 f = self.model([x, None], feat_out=True)[0]
                 feat_img.append(f)
-                groups = self._resolve_topology_groups(batch, batch_size=x.shape[0], device=self.device)
+                groups, _ = self._resolve_topology_groups(batch, batch_size=x.shape[0], device=self.device)
                 if groups is None:
                     groups = torch.arange(fallback_group_offset, fallback_group_offset + x.shape[0], device=self.device)
                     fallback_group_offset += x.shape[0]
@@ -278,7 +280,7 @@ class FedtoaClient(FedavgClient):
                 x = x.to(self.device)
                 f = self.model([None, x], feat_out=True)[1]
                 feat_txt.append(f)
-                groups = self._resolve_topology_groups(batch, batch_size=x.shape[0], device=self.device)
+                groups, _ = self._resolve_topology_groups(batch, batch_size=x.shape[0], device=self.device)
                 if groups is None:
                     groups = torch.arange(fallback_group_offset, fallback_group_offset + x.shape[0], device=self.device)
                     fallback_group_offset += x.shape[0]
@@ -290,7 +292,7 @@ class FedtoaClient(FedavgClient):
                 out = self.model([x_img, x_txt], feat_out=True)
                 feat_img.append(out[0])
                 feat_txt.append(out[1])
-                groups = self._resolve_topology_groups(batch, batch_size=x_img.shape[0], device=self.device)
+                groups, _ = self._resolve_topology_groups(batch, batch_size=x_img.shape[0], device=self.device)
                 if groups is None:
                     groups = torch.arange(fallback_group_offset, fallback_group_offset + x_img.shape[0], device=self.device)
                     fallback_group_offset += x_img.shape[0]
@@ -369,6 +371,7 @@ class FedtoaClient(FedavgClient):
         use_topo = bool(getattr(self.args, "use_topo", True))
         use_spec = bool(getattr(self.args, "use_spec", True))
         use_lip = bool(getattr(self.args, "use_lip", True))
+        lip_enabled = use_lip and abs(eta) > 0.0
 
         last_metrics = {}
         num_classes = self._num_classes()
@@ -384,7 +387,7 @@ class FedtoaClient(FedavgClient):
         ]
         backbone_frozen = len(non_prompt_trainable_named) == 0
         logger.info(
-            "[FEDTOA][CLIENT %s] student prompt-only=%s freeze_backbone=%s backbone_frozen=%s trainable_params=%s non_prompt_trainable_params=%s trainable_elems=%s prompt_elems=%s effective_beta_topo=%.6f round=%s",
+            "[FEDTOA][CLIENT %s] student prompt-only=%s freeze_backbone=%s backbone_frozen=%s trainable_params=%s non_prompt_trainable_params=%s trainable_elems=%s prompt_elems=%s effective_beta_topo=%.6f eta_lip=%.6f lip_enabled=%s round=%s",
             self.id,
             prompt_only,
             bool(getattr(self.args, "freeze_backbone", True)),
@@ -394,6 +397,8 @@ class FedtoaClient(FedavgClient):
             trainable_count,
             prompt_count,
             beta_effective,
+            eta,
+            lip_enabled,
             int(getattr(self.args, "fedtoa_comm_round", 0)),
         )
 
@@ -415,10 +420,11 @@ class FedtoaClient(FedavgClient):
                 else:
                     task_loss = criterion(logits.to(targets.device), targets)
 
-                topology_groups = self._resolve_topology_groups(batch, batch_size=feats.shape[0], device=feats.device)
+                topology_groups, topology_group_source = self._resolve_topology_groups(batch, batch_size=feats.shape[0], device=feats.device)
                 if topology_groups is None:
                     if targets is not None:
                         topology_groups = targets.to(dtype=torch.long)
+                        topology_group_source = "targets"
                     else:
                         topology_groups = torch.arange(
                             fallback_group_offset,
@@ -426,7 +432,9 @@ class FedtoaClient(FedavgClient):
                             device=feats.device,
                             dtype=torch.long,
                         )
+                        topology_group_source = "arange_fallback"
                         fallback_group_offset += feats.shape[0]
+                raw_topology_groups = topology_groups
                 topology_groups = self._map_groups_to_table(topology_groups, num_classes)
 
                 local_proto, local_support = compute_class_prototypes(
@@ -467,20 +475,33 @@ class FedtoaClient(FedavgClient):
                             torch.triu(valid_edges_no_diag, diagonal=1),
                             as_tuple=False,
                         )[:12].tolist()
+                        support_set = set(support_true_indices)
+                        blueprint_edge_overlap_count = 0
+                        for e0, e1 in blueprint_true_edges.tolist():
+                            if e0 in support_set and e1 in support_set:
+                                blueprint_edge_overlap_count += 1
+                        raw_group_sample = raw_topology_groups[:12].detach().cpu().tolist()
+                        mapped_group_sample = topology_groups[:12].detach().cpu().tolist()
+                        remap_applied = raw_group_sample != mapped_group_sample
                         logger.info(
-                            "[FEDTOA][ACTIVE_EDGE_DEBUG] client=%s round=%s support_mask_true_count=%s support_true_indices_sample=%s blueprint_mask_true_count=%s blueprint_edge_sample=%s valid_edges_true_count=%s valid_edges_no_diag_true_count=%s valid_edges_no_diag_sample=%s active_edge_count=%s local_group_count=%s local_class_count=%s",
+                            "[FEDTOA][ACTIVE_EDGE_DEBUG] client=%s round=%s support_mask_true_count=%s support_true_indices_sample=%s blueprint_mask_true_count=%s blueprint_edge_sample=%s blueprint_edge_overlap_count=%s valid_edges_true_count=%s valid_edges_no_diag_true_count=%s valid_edges_no_diag_sample=%s active_edge_count=%s local_group_count=%s local_class_count=%s group_source=%s raw_group_sample=%s mapped_group_sample=%s remap_applied=%s",
                             self.id,
                             int(getattr(self.args, "fedtoa_comm_round", 0)),
                             support_mask_true_count,
                             support_true_indices_sample,
                             blueprint_mask_true_count,
                             blueprint_edge_sample,
+                            blueprint_edge_overlap_count,
                             valid_edges_true_count,
                             valid_edges_no_diag_true_count,
                             valid_edges_no_diag_sample,
                             active_edge_count,
                             int(torch.unique(topology_groups).numel()),
                             int(local_support.sum().item()),
+                            topology_group_source,
+                            raw_group_sample,
+                            mapped_group_sample,
+                            remap_applied,
                         )
                         active_edge_debug_logged = True
                     topo_loss = masked_topology_loss(
@@ -498,7 +519,7 @@ class FedtoaClient(FedavgClient):
                     )
 
                 lip_loss = task_loss.new_tensor(0.0)
-                if use_lip:
+                if lip_enabled:
                     lip_loss = prompt_lipschitz_regularization(prompt_params)
 
                 total_loss = fedtoa_total_loss(

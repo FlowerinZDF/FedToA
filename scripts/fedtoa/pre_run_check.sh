@@ -12,7 +12,7 @@ log_file="${FEDTOA_LOG_FILE:-logs/fedtoa/precheck_$(fedtoa_ts).log}"
 
 beta_topo="${BETA_TOPO:-1.0}"
 gamma_spec="${GAMMA_SPEC:-1.0}"
-eta_lip="${ETA_LIP:-1.0}"
+eta_lip="${ETA_LIP:-0.0}"
 warmup_rounds="${WARMUP_ROUNDS:-5}"
 warmup_start_beta="${WARMUP_START_BETA:-0.05}"
 warmup_mode="${WARMUP_MODE:-linear}"

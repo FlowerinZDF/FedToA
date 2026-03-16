@@ -241,6 +241,12 @@ class FedtoaServer(FedavgServer):
         topo_mean = aggregate_topologies_mean(topologies)
         topo_var = aggregate_topologies_var(topologies)
 
+        # Restrict blueprint edge candidacy to classes supported by at least one
+        # teacher so student support-vs-blueprint overlap can be meaningful.
+        active_classes = class_masks.any(dim=0)
+        active_pair_mask = active_classes.unsqueeze(0) & active_classes.unsqueeze(1)
+        topo_mean_masked = topo_mean.masked_fill(~active_pair_mask, float("-inf"))
+
         c = topo_mean.shape[0]
         default_topk = max((c * (c - 1)) // 2, 1)
         raw_topk = getattr(self.args, "topk_edges", None)
@@ -248,22 +254,24 @@ class FedtoaServer(FedavgServer):
         var_threshold = getattr(self.args, "fedtoa_var_threshold", None)
 
         confidence_mask = build_confidence_mask(
-            topo_mean=topo_mean,
+            topo_mean=topo_mean_masked,
             topo_var=topo_var,
             topk_edges=topk_edges,
             var_threshold=var_threshold,
         )
+        confidence_mask = confidence_mask & active_pair_mask
 
         retained_edges = int(torch.triu(confidence_mask, diagonal=1).sum().item())
         max_edges = max((c * (c - 1)) // 2, 1)
         retained_density = float(retained_edges / max_edges)
         logger.info(
-            "[FEDTOA][BLUEPRINT] round=%s teachers=%s topk_edges=%s retained_edges=%s retained_density=%.6f var_threshold_active=%s support_mask_active=%s confidence_mask_active=%s var_threshold=%s",
+            "[FEDTOA][BLUEPRINT] round=%s teachers=%s topk_edges=%s retained_edges=%s retained_density=%.6f active_classes=%s var_threshold_active=%s support_mask_active=%s confidence_mask_active=%s var_threshold=%s",
             str(self.round).zfill(4),
             len(payloads),
             topk_edges,
             retained_edges,
             retained_density,
+            int(active_classes.sum().item()),
             var_threshold is not None,
             bool(class_masks.to(dtype=torch.bool).any().item()),
             bool(confidence_mask.any().item()),
@@ -397,7 +405,9 @@ class FedtoaServer(FedavgServer):
                 self.out_modality_scale = self.args.out_modality_scales[i]
                 self._aggregate(student_ids, student_update_sizes, fedavg=True)
                 self.global_models[dataset] = self.global_model
-            self._central_evaluate(fedavg=True)
+            # Keep fedavg-eval aggregation path for parity checks, but avoid
+            # evaluating here so round-level evaluation remains centralized in
+            # main.py via server.evaluate(...).
             self.global_models = old_models
 
         if len(student_ids) > 0 and len(student_update_sizes) > 0:

@@ -25,7 +25,7 @@ reduce_test_samples="${REDUCE_TEST_SAMPLES:-32}"
 
 beta_topo="${BETA_TOPO:-1e-3}"
 gamma_spec="${GAMMA_SPEC:-1.0}"
-eta_lip="${ETA_LIP:-1.0}"
+eta_lip="${ETA_LIP:-0.0}"
 warmup_rounds="${WARMUP_ROUNDS:-2}"
 warmup_start_beta="${WARMUP_START_BETA:-1e-4}"
 warmup_mode="${WARMUP_MODE:-linear}"
