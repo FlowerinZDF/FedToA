@@ -353,6 +353,8 @@ class FedtoaClient(FedavgClient):
             int(getattr(self.args, "fedtoa_comm_round", 0)),
         )
 
+        active_edge_debug_logged = False
+
         for _ in range(epochs):
             for batch in self.train_loader:
                 optimizer.zero_grad()
@@ -405,21 +407,31 @@ class FedtoaClient(FedavgClient):
                         & support_mask.unsqueeze(0)
                         & support_mask.unsqueeze(1)
                     )
+                    valid_edges_no_diag = valid_edges.clone()
+                    valid_edges_no_diag.fill_diagonal_(False)
                     active_edge_count = int(valid_edges.sum().item())
-                    if active_edge_count == 0:
+                    if active_edge_count == 0 and not active_edge_debug_logged:
+                        support_mask_true_count = int(support_mask.sum().item())
+                        blueprint_mask_true_count = int(blueprint_mask.sum().item())
+                        blueprint_mask_no_diag = blueprint_mask.clone()
+                        blueprint_mask_no_diag.fill_diagonal_(False)
+                        blueprint_mask_no_diag_true_count = int(blueprint_mask_no_diag.sum().item())
+                        valid_edges_true_count = int(valid_edges.sum().item())
+                        valid_edges_no_diag_true_count = int(valid_edges_no_diag.sum().item())
                         logger.info(
-                            "[FEDTOA][ACTIVE_EDGE_DEBUG] client=%s round=%s local_topology_shape=%s support_mask_shape=%s blueprint_shape=%s local_group_count=%s local_class_count=%s support_true=%s active_classes_true=%s blueprint_true=%s",
+                            "[FEDTOA][ACTIVE_EDGE_DEBUG] client=%s round=%s support_mask_true_count=%s blueprint_mask_true_count=%s blueprint_mask_no_diag_true_count=%s valid_edges_true_count=%s valid_edges_no_diag_true_count=%s active_edge_count=%s local_group_count=%s local_class_count=%s",
                             self.id,
                             int(getattr(self.args, "fedtoa_comm_round", 0)),
-                            tuple(local_topology.shape),
-                            tuple(support_mask.shape),
-                            tuple(blueprint_mask.shape),
+                            support_mask_true_count,
+                            blueprint_mask_true_count,
+                            blueprint_mask_no_diag_true_count,
+                            valid_edges_true_count,
+                            valid_edges_no_diag_true_count,
+                            active_edge_count,
                             int(torch.unique(topology_groups).numel()),
                             int(local_support.sum().item()),
-                            int(support_mask.sum().item()),
-                            int(active_classes.sum().item()),
-                            int(blueprint_mask.sum().item()),
                         )
+                        active_edge_debug_logged = True
                     topo_loss = masked_topology_loss(
                         local_topology=local_topology,
                         global_topology=self.global_blueprint.topology_mean.to(self.device),
