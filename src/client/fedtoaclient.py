@@ -140,6 +140,8 @@ class FedtoaClient(FedavgClient):
             for param in self.model.parameters():
                 param.requires_grad = False
 
+        active_modality_index = 0 if self.modality == "img" else 1 if self.modality == "txt" else None
+
         prompt_candidates = []
         for name, param in self.model.named_parameters():
             if self._param_matches_prompt_tokens(name, normalized_prompt_tokens):
@@ -156,13 +158,44 @@ class FedtoaClient(FedavgClient):
                 prompt_candidates,
             )
 
+        def _is_active_branch_param(name: str) -> bool:
+            if active_modality_index is None:
+                return True
+            return (
+                name.startswith("norm.")
+                or name.startswith(f"embeddings.{active_modality_index}.")
+                or name.startswith(f"blockses.{active_modality_index}.")
+                or name.startswith(f"heads.{active_modality_index}.")
+            )
+
         prompt_params: List[torch.nn.Parameter] = []
         matched_prompt_names: List[str] = []
+        inactive_prompt_matches: List[str] = []
         for name, param in self.model.named_parameters():
-            if self._param_matches_prompt_tokens(name, normalized_prompt_tokens):
+            if not self._param_matches_prompt_tokens(name, normalized_prompt_tokens):
+                continue
+            if not _is_active_branch_param(name):
+                inactive_prompt_matches.append(name)
+                continue
+            param.requires_grad = True
+            prompt_params.append(param)
+            matched_prompt_names.append(name)
+
+        lightweight_fallback_names: List[str] = []
+        if len(prompt_params) == 0 and active_modality_index is not None:
+            for candidate_name in (
+                "norm.weight",
+                "norm.bias",
+                f"heads.{active_modality_index}.head.weight",
+                f"heads.{active_modality_index}.head.bias",
+            ):
+                param = dict(self.model.named_parameters()).get(candidate_name)
+                if param is None:
+                    continue
                 param.requires_grad = True
                 prompt_params.append(param)
-                matched_prompt_names.append(name)
+                lightweight_fallback_names.append(candidate_name)
+                matched_prompt_names.append(candidate_name)
 
         used_fallback = False
         if len(prompt_params) == 0:
@@ -186,15 +219,34 @@ class FedtoaClient(FedavgClient):
         self._fedtoa_prompt_tokens = tuple(prompt_tokens)
 
         logger.info(
-            "[FEDTOA][PROMPT_MATCH] client=%s configured_tokens=%s matched_count=%s matched_names=%s fallback_used=%s",
+            "[FEDTOA][PROMPT_MATCH] client=%s configured_tokens=%s matched_count=%s matched_names=%s inactive_branch_matches=%s lightweight_fallback_names=%s fallback_used=%s",
             self.id,
             list(prompt_tokens),
             len(matched_prompt_names),
             matched_prompt_names,
+            inactive_prompt_matches,
+            lightweight_fallback_names,
             used_fallback,
         )
 
         return prompt_params
+
+    @staticmethod
+    def _loss_requires_grad_summary(
+        task_loss: torch.Tensor,
+        topo_loss: torch.Tensor,
+        spec_loss: torch.Tensor,
+        lip_loss: torch.Tensor,
+        total_loss: torch.Tensor,
+    ) -> Dict[str, object]:
+        return {
+            "task_loss_requires_grad": bool(task_loss.requires_grad),
+            "topo_loss_requires_grad": bool(topo_loss.requires_grad),
+            "spec_loss_requires_grad": bool(spec_loss.requires_grad),
+            "lip_loss_requires_grad": bool(lip_loss.requires_grad),
+            "total_loss_requires_grad": bool(total_loss.requires_grad),
+            "total_loss_grad_fn": str(total_loss.grad_fn),
+        }
 
     def _effective_beta_topo(self) -> float:
         target_beta = float(getattr(self.args, "beta_topo", 1.0))
@@ -532,7 +584,58 @@ class FedtoaClient(FedavgClient):
                     eta=eta,
                 )
 
+                grad_diag = self._loss_requires_grad_summary(
+                    task_loss=task_loss,
+                    topo_loss=topo_loss,
+                    spec_loss=spec_loss,
+                    lip_loss=lip_loss,
+                    total_loss=total_loss,
+                )
+                logger.info(
+                    "[FEDTOA][GRAD_PATH] client=%s round=%s matched_names=%s task_requires_grad=%s topo_requires_grad=%s spec_requires_grad=%s lip_requires_grad=%s total_requires_grad=%s total_grad_fn=%s",
+                    self.id,
+                    int(getattr(self.args, "fedtoa_comm_round", 0)),
+                    list(getattr(self, "_fedtoa_prompt_trainable_names", ())),
+                    grad_diag["task_loss_requires_grad"],
+                    grad_diag["topo_loss_requires_grad"],
+                    grad_diag["spec_loss_requires_grad"],
+                    grad_diag["lip_loss_requires_grad"],
+                    grad_diag["total_loss_requires_grad"],
+                    grad_diag["total_loss_grad_fn"],
+                )
+
+                if not total_loss.requires_grad:
+                    nonzero_losses = {
+                        "task_loss": float(task_loss.detach().cpu()),
+                        "topo_loss_used": float(topo_loss.detach().cpu()),
+                        "spec_loss": float(spec_loss.detach().cpu()),
+                        "lip_loss": float(lip_loss.detach().cpu()),
+                    }
+                    raise RuntimeError(
+                        "[FEDTOA][GRAD_PATH_BLOCKED] total_loss has no gradient path. "
+                        f"loss_values={nonzero_losses} requires_grad={grad_diag} "
+                        f"selected_trainable_params={list(getattr(self, '_fedtoa_prompt_trainable_names', ()))}. "
+                        "Current selected parameters are not connected to active loss graph."
+                    )
+
                 total_loss.backward()
+                matched_named_params = [
+                    (name, p) for name, p in self.model.named_parameters()
+                    if name in set(getattr(self, "_fedtoa_prompt_trainable_names", ()))
+                ]
+                matched_with_grad = [name for name, p in matched_named_params if p.grad is not None]
+                matched_with_nonzero_grad = [
+                    name for name, p in matched_named_params
+                    if p.grad is not None and bool(torch.any(p.grad.detach() != 0))
+                ]
+                logger.info(
+                    "[FEDTOA][GRAD_AFTER_BACKWARD] client=%s round=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
+                    self.id,
+                    int(getattr(self.args, "fedtoa_comm_round", 0)),
+                    matched_with_grad,
+                    matched_with_nonzero_grad,
+                )
+
                 if self.args.max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(trainable_params, self.args.max_grad_norm)
                 optimizer.step()
@@ -547,6 +650,13 @@ class FedtoaClient(FedavgClient):
                     "spec_loss": float(spec_loss.detach().cpu()),
                     "lip_loss": float(lip_loss.detach().cpu()),
                     "total_loss": float(total_loss.detach().cpu()),
+                    "total_loss_requires_grad": bool(total_loss.requires_grad),
+                    "task_loss_requires_grad": grad_diag["task_loss_requires_grad"],
+                    "topo_loss_requires_grad": grad_diag["topo_loss_requires_grad"],
+                    "spec_loss_requires_grad": grad_diag["spec_loss_requires_grad"],
+                    "lip_loss_requires_grad": grad_diag["lip_loss_requires_grad"],
+                    "matched_with_grad": matched_with_grad,
+                    "matched_with_nonzero_grad": matched_with_nonzero_grad,
                 }
 
         final_epoch = int(getattr(self.args, "E", epochs))
@@ -561,9 +671,16 @@ class FedtoaClient(FedavgClient):
             "spec_loss": float(last_metrics.get("spec_loss", 0.0)),
             "lip_loss": float(last_metrics.get("lip_loss", 0.0)),
             "total_loss": loss_value,
+            "total_loss_requires_grad": bool(last_metrics.get("total_loss_requires_grad", False)),
+            "task_loss_requires_grad": bool(last_metrics.get("task_loss_requires_grad", False)),
+            "topo_loss_requires_grad": bool(last_metrics.get("topo_loss_requires_grad", False)),
+            "spec_loss_requires_grad": bool(last_metrics.get("spec_loss_requires_grad", False)),
+            "lip_loss_requires_grad": bool(last_metrics.get("lip_loss_requires_grad", False)),
+            "matched_with_grad": list(last_metrics.get("matched_with_grad", [])),
+            "matched_with_nonzero_grad": list(last_metrics.get("matched_with_nonzero_grad", [])),
         }
         logger.info(
-            "[FEDTOA][TRAIN_METRICS] client=%s round=%s task_loss=%.6f topo_loss_used=%.6f scaled_topo_term=%.6f spec_loss=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f prompt_only=%s freeze_backbone=%s",
+            "[FEDTOA][TRAIN_METRICS] client=%s round=%s task_loss=%.6f topo_loss_used=%.6f scaled_topo_term=%.6f spec_loss=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
             self.id,
             int(getattr(self.args, "fedtoa_comm_round", 0)),
             metric_payload["task_loss"],
@@ -575,6 +692,9 @@ class FedtoaClient(FedavgClient):
             metric_payload["effective_beta_topo"],
             prompt_only,
             bool(getattr(self.args, "freeze_backbone", True)),
+            metric_payload["total_loss_requires_grad"],
+            metric_payload["matched_with_grad"],
+            metric_payload["matched_with_nonzero_grad"],
         )
 
         result_payload = {
