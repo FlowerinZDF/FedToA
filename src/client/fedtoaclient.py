@@ -192,8 +192,17 @@ class FedtoaClient(FedavgClient):
                 f"heads.{active_modality_index}.",
                 f"projections.{active_modality_index}.",
                 f"projectors.{active_modality_index}.",
-                f"embeddings.{active_modality_index}.",
             )
+            txt_large_embedding_names = {
+                f"embeddings.{active_modality_index}.word_embeddings.weight",
+                f"embeddings.{active_modality_index}.position_embeddings.weight",
+                f"embeddings.{active_modality_index}.token_type_embeddings.weight",
+            }
+
+            def _allow_lightweight_branch_param(candidate_name: str) -> bool:
+                if self.modality != "txt":
+                    return True
+                return candidate_name not in txt_large_embedding_names
 
             def _add_candidates(candidates: List[str], reason: str) -> None:
                 for candidate_name in candidates:
@@ -213,13 +222,25 @@ class FedtoaClient(FedavgClient):
                 if not _is_active_branch_param(name):
                     continue
                 if any(name.startswith(prefix) for prefix in branch_prefixes):
-                    if name.endswith("weight") or name.endswith("bias"):
+                    if (name.endswith("weight") or name.endswith("bias")) and _allow_lightweight_branch_param(name):
                         branch_head_candidates.append(name)
             branch_head_candidates = sorted(dict.fromkeys(branch_head_candidates))[:8]
             _add_candidates(branch_head_candidates, reason="branch_head_projection")
 
             norm_candidates = [name for name in ("norm.weight", "norm.bias") if name in name_to_param]
             _add_candidates(norm_candidates, reason="norm_support")
+
+            block_norm_candidates = [
+                name
+                for name in name_to_param
+                if (
+                    name.startswith(f"blockses.{active_modality_index}.")
+                    and ".norm" in name
+                    and (name.endswith("weight") or name.endswith("bias"))
+                )
+            ]
+            block_norm_candidates = sorted(dict.fromkeys(block_norm_candidates))[:8]
+            _add_candidates(block_norm_candidates, reason="branch_norm_support")
 
             cls_candidates = [
                 name
@@ -252,12 +273,15 @@ class FedtoaClient(FedavgClient):
         self._fedtoa_prompt_trainable_reasons = dict(selection_reasons)
         self._fedtoa_prompt_used_fallback = used_fallback
         self._fedtoa_prompt_tokens = tuple(prompt_tokens)
+        selected_param_elems = int(sum(name_to_param[name].numel() for name in matched_prompt_names if name in name_to_param))
 
         logger.info(
-            "[FEDTOA][PROMPT_MATCH] client=%s configured_tokens=%s matched_count=%s matched_names=%s matched_reasons=%s inactive_branch_matches=%s lightweight_fallback_names=%s fallback_used=%s",
+            "[FEDTOA][PROMPT_MATCH] client=%s modality=%s configured_tokens=%s matched_count=%s matched_param_elems=%s matched_names=%s matched_reasons=%s inactive_branch_matches=%s lightweight_fallback_names=%s fallback_used=%s",
             self.id,
+            self.modality,
             list(prompt_tokens),
             len(matched_prompt_names),
+            selected_param_elems,
             matched_prompt_names,
             selection_reasons,
             inactive_prompt_matches,
