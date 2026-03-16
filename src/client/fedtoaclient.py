@@ -25,6 +25,19 @@ from src.methods.fedtoa.topology import (
 logger = logging.getLogger(__name__)
 
 
+_FEDTOA_DEFAULT_PROMPT_TOKENS: Tuple[str, ...] = (
+    "prompt",
+    "masp",
+    "adapter",
+    "context",
+    "ctx",
+    "prefix",
+    "softprompt",
+    "cls_token",
+    "reg_token",
+)
+
+
 class FedtoaClient(FedavgClient):
     """FedToA client with student-side local adaptation support.
 
@@ -85,10 +98,18 @@ class FedtoaClient(FedavgClient):
     def _prompt_name_tokens(self) -> Tuple[str, ...]:
         tokens = getattr(self.args, "fedtoa_prompt_param_names", None)
         if tokens is None:
-            return ("prompt",)
+            return _FEDTOA_DEFAULT_PROMPT_TOKENS
         if isinstance(tokens, str):
-            return (tokens,)
-        return tuple(tokens)
+            configured = (tokens,)
+        else:
+            configured = tuple(tokens)
+
+        merged: List[str] = []
+        for token in configured + _FEDTOA_DEFAULT_PROMPT_TOKENS:
+            t = str(token).strip()
+            if t:
+                merged.append(t)
+        return tuple(dict.fromkeys(merged))
 
     @staticmethod
     def _normalize_name_tokens(tokens: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -116,6 +137,22 @@ class FedtoaClient(FedavgClient):
         if freeze_backbone or prompt_only:
             for param in self.model.parameters():
                 param.requires_grad = False
+
+        prompt_candidates = []
+        for name, param in self.model.named_parameters():
+            if self._param_matches_prompt_tokens(name, normalized_prompt_tokens):
+                prompt_candidates.append(name)
+
+        comm_round = int(getattr(self.args, "fedtoa_comm_round", 0))
+        if getattr(self, "_fedtoa_prompt_candidate_log_round", None) != comm_round:
+            self._fedtoa_prompt_candidate_log_round = comm_round
+            logger.info(
+                "[FEDTOA][PROMPT_CANDIDATES] client=%s round=%s candidate_count=%s candidates=%s",
+                self.id,
+                comm_round,
+                len(prompt_candidates),
+                prompt_candidates,
+            )
 
         prompt_params: List[torch.nn.Parameter] = []
         matched_prompt_names: List[str] = []
@@ -147,7 +184,7 @@ class FedtoaClient(FedavgClient):
         self._fedtoa_prompt_tokens = tuple(prompt_tokens)
 
         logger.info(
-            "[FEDTOA][PROMPT_MATCH] client=%s tokens=%s matched_count=%s matched_names=%s fallback_used=%s",
+            "[FEDTOA][PROMPT_MATCH] client=%s configured_tokens=%s matched_count=%s matched_names=%s fallback_used=%s",
             self.id,
             list(prompt_tokens),
             len(matched_prompt_names),
@@ -339,14 +376,21 @@ class FedtoaClient(FedavgClient):
         trainable_named = [name for name, param in self.model.named_parameters() if param.requires_grad]
         trainable_count = sum(param.numel() for param in self.model.parameters() if param.requires_grad)
         prompt_count = sum(param.numel() for param in prompt_params)
-        backbone_frozen = len(trainable_named) == len(self._fedtoa_prompt_trainable_names)
+        prompt_param_ids = {id(param) for param in prompt_params}
+        non_prompt_trainable_named = [
+            name
+            for name, param in self.model.named_parameters()
+            if param.requires_grad and id(param) not in prompt_param_ids
+        ]
+        backbone_frozen = len(non_prompt_trainable_named) == 0
         logger.info(
-            "[FEDTOA][CLIENT %s] student prompt-only=%s freeze_backbone=%s backbone_frozen=%s trainable_params=%s trainable_elems=%s prompt_elems=%s effective_beta_topo=%.6f round=%s",
+            "[FEDTOA][CLIENT %s] student prompt-only=%s freeze_backbone=%s backbone_frozen=%s trainable_params=%s non_prompt_trainable_params=%s trainable_elems=%s prompt_elems=%s effective_beta_topo=%.6f round=%s",
             self.id,
             prompt_only,
             bool(getattr(self.args, "freeze_backbone", True)),
             backbone_frozen,
             trainable_named,
+            non_prompt_trainable_named,
             trainable_count,
             prompt_count,
             beta_effective,
@@ -409,24 +453,31 @@ class FedtoaClient(FedavgClient):
                     )
                     valid_edges_no_diag = valid_edges.clone()
                     valid_edges_no_diag.fill_diagonal_(False)
-                    active_edge_count = int(valid_edges.sum().item())
-                    if active_edge_count == 0 and not active_edge_debug_logged:
+                    active_edge_count = int(valid_edges_no_diag.sum().item())
+                    if not active_edge_debug_logged:
                         support_mask_true_count = int(support_mask.sum().item())
+                        support_true_indices = torch.nonzero(support_mask, as_tuple=False).flatten().tolist()
+                        support_true_indices_sample = support_true_indices[:12]
                         blueprint_mask_true_count = int(blueprint_mask.sum().item())
-                        blueprint_mask_no_diag = blueprint_mask.clone()
-                        blueprint_mask_no_diag.fill_diagonal_(False)
-                        blueprint_mask_no_diag_true_count = int(blueprint_mask_no_diag.sum().item())
+                        blueprint_true_edges = torch.nonzero(torch.triu(blueprint_mask, diagonal=1), as_tuple=False)
+                        blueprint_edge_sample = blueprint_true_edges[:12].tolist()
                         valid_edges_true_count = int(valid_edges.sum().item())
                         valid_edges_no_diag_true_count = int(valid_edges_no_diag.sum().item())
+                        valid_edges_no_diag_sample = torch.nonzero(
+                            torch.triu(valid_edges_no_diag, diagonal=1),
+                            as_tuple=False,
+                        )[:12].tolist()
                         logger.info(
-                            "[FEDTOA][ACTIVE_EDGE_DEBUG] client=%s round=%s support_mask_true_count=%s blueprint_mask_true_count=%s blueprint_mask_no_diag_true_count=%s valid_edges_true_count=%s valid_edges_no_diag_true_count=%s active_edge_count=%s local_group_count=%s local_class_count=%s",
+                            "[FEDTOA][ACTIVE_EDGE_DEBUG] client=%s round=%s support_mask_true_count=%s support_true_indices_sample=%s blueprint_mask_true_count=%s blueprint_edge_sample=%s valid_edges_true_count=%s valid_edges_no_diag_true_count=%s valid_edges_no_diag_sample=%s active_edge_count=%s local_group_count=%s local_class_count=%s",
                             self.id,
                             int(getattr(self.args, "fedtoa_comm_round", 0)),
                             support_mask_true_count,
+                            support_true_indices_sample,
                             blueprint_mask_true_count,
-                            blueprint_mask_no_diag_true_count,
+                            blueprint_edge_sample,
                             valid_edges_true_count,
                             valid_edges_no_diag_true_count,
+                            valid_edges_no_diag_sample,
                             active_edge_count,
                             int(torch.unique(topology_groups).numel()),
                             int(local_support.sum().item()),
@@ -435,7 +486,7 @@ class FedtoaClient(FedavgClient):
                     topo_loss = masked_topology_loss(
                         local_topology=local_topology,
                         global_topology=self.global_blueprint.topology_mean.to(self.device),
-                        edge_mask=blueprint_mask,
+                        edge_mask=valid_edges_no_diag,
                         class_support_mask=support_mask,
                     )
 
