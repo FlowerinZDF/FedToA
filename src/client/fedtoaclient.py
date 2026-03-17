@@ -51,6 +51,7 @@ class FedtoaClient(FedavgClient):
         super().__init__(**kwargs)
         self.global_blueprint: Optional[GlobalTopologyBlueprint] = None
         self._fedtoa_warned_missing_task_target = False
+        self._fedtoa_warned_nonfinite_fallback_task_loss = False
         self._fedtoa_upload_base_state: Optional[Dict[str, torch.Tensor]] = None
 
     def _num_classes(self) -> int:
@@ -335,10 +336,24 @@ class FedtoaClient(FedavgClient):
         if not bool(valid_anchor_mask.any()):
             return feats.sum() * 0.0
 
-        logits = logits.masked_fill(eye_mask, float("-inf"))
-        log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+        comparison_mask = ~eye_mask
+        logits = logits.masked_fill(~comparison_mask, float("-inf"))
+        row_logsumexp = torch.logsumexp(logits, dim=1, keepdim=True)
+        finite_row_mask = torch.isfinite(row_logsumexp.squeeze(1))
+
+        valid_anchor_mask = valid_anchor_mask & finite_row_mask
+        if not bool(valid_anchor_mask.any()):
+            return feats.sum() * 0.0
+
+        log_prob = logits - row_logsumexp
+        safe_log_prob = torch.where(positive_mask, log_prob, torch.zeros_like(log_prob))
         pos_counts = positive_mask.sum(dim=1).clamp_min(1).to(dtype=feats.dtype)
-        per_anchor = -(positive_mask.to(dtype=feats.dtype) * log_prob).sum(dim=1) / pos_counts
+        per_anchor = -safe_log_prob.sum(dim=1) / pos_counts
+        finite_anchor_mask = torch.isfinite(per_anchor)
+        valid_anchor_mask = valid_anchor_mask & finite_anchor_mask
+        if not bool(valid_anchor_mask.any()):
+            return feats.sum() * 0.0
+
         return per_anchor[valid_anchor_mask].mean()
 
     @staticmethod
@@ -671,6 +686,17 @@ class FedtoaClient(FedavgClient):
                     else:
                         task_source = "supervised_connected"
 
+                if task_source.startswith("fallback") and not torch.isfinite(task_loss):
+                    if not self._fedtoa_warned_nonfinite_fallback_task_loss:
+                        logger.warning(
+                            "[FEDTOA][LOSS_SANITIZE] client=%s round=%s nonfinite fallback task_loss detected; replacing with zero-gradient-safe scalar.",
+                            self.id,
+                            int(getattr(self.args, "fedtoa_comm_round", 0)),
+                        )
+                        self._fedtoa_warned_nonfinite_fallback_task_loss = True
+                    task_loss = feats.sum() * 0.0
+                    task_source = f"{task_source}_sanitized_nonfinite"
+
                 local_proto, local_support = compute_class_prototypes(
                     feats,
                     topology_groups,
@@ -774,6 +800,13 @@ class FedtoaClient(FedavgClient):
                     eta=eta,
                 )
 
+                loss_finite_diag = {
+                    "task": bool(torch.isfinite(task_loss).all().item()),
+                    "topo": bool(torch.isfinite(topo_loss).all().item()),
+                    "spec": bool(torch.isfinite(spec_loss).all().item()),
+                    "total": bool(torch.isfinite(total_loss).all().item()),
+                }
+
                 grad_diag = self._loss_requires_grad_summary(
                     task_loss=task_loss,
                     topo_loss=topo_loss,
@@ -876,6 +909,7 @@ class FedtoaClient(FedavgClient):
                     "matched_with_nonzero_grad": matched_with_nonzero_grad,
                     "task_source": task_source,
                     "task_connected_selected_nonzero": task_path_diag["task_connected_selected_nonzero"],
+                    "loss_finite": loss_finite_diag,
                 }
 
         final_epoch = int(getattr(self.args, "E", epochs))
@@ -899,9 +933,10 @@ class FedtoaClient(FedavgClient):
             "matched_with_nonzero_grad": list(last_metrics.get("matched_with_nonzero_grad", [])),
             "task_source": str(last_metrics.get("task_source", "unknown")),
             "task_connected_selected_nonzero": list(last_metrics.get("task_connected_selected_nonzero", [])),
+            "loss_finite": dict(last_metrics.get("loss_finite", {})),
         }
         logger.info(
-            "[FEDTOA][TRAIN_METRICS] client=%s round=%s task_source=%s task_loss=%.6f topo_loss_used=%.6f scaled_topo_term=%.6f spec_loss=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
+            "[FEDTOA][TRAIN_METRICS] client=%s round=%s task_source=%s task_loss=%.6f topo_loss_used=%.6f scaled_topo_term=%.6f spec_loss=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f finite(task/topo/spec/total)=%s/%s/%s/%s prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
             self.id,
             int(getattr(self.args, "fedtoa_comm_round", 0)),
             metric_payload["task_source"],
@@ -912,6 +947,10 @@ class FedtoaClient(FedavgClient):
             metric_payload["lip_loss"],
             metric_payload["active_edge_count"],
             metric_payload["effective_beta_topo"],
+            bool(metric_payload["loss_finite"].get("task", False)),
+            bool(metric_payload["loss_finite"].get("topo", False)),
+            bool(metric_payload["loss_finite"].get("spec", False)),
+            bool(metric_payload["loss_finite"].get("total", False)),
             prompt_only,
             bool(getattr(self.args, "freeze_backbone", True)),
             metric_payload["total_loss_requires_grad"],

@@ -252,6 +252,26 @@ def test_extract_teacher_topology_retrieval_without_class_labels():
     assert payload.support_mask.tolist() == [False, True, True, False]
 
 
+
+
+def test_groupwise_contrastive_task_loss_ignores_invalid_entries_and_stays_finite():
+    _install_client_import_stubs()
+    from client.fedtoaclient import FedtoaClient
+
+    feats = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    group_ids = torch.tensor([0, 0, 1], dtype=torch.long)
+
+    loss = FedtoaClient._groupwise_contrastive_task_loss(feats=feats, group_ids=group_ids)
+
+    assert torch.isfinite(loss)
+    assert loss.ndim == 0
+    loss.backward()
+    assert torch.isfinite(feats.grad).all()
+
 def test_local_train_student_img_retrieval_batch_zero_task_loss_warns_once():
     _install_client_import_stubs()
     from client.fedtoaclient import FedtoaClient
