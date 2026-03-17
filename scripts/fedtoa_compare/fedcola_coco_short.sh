@@ -1,31 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export OMP_NUM_THREADS=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../fedtoa/common.sh"
 
-goal=YourGoal
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 
-ic=12 # number of img clients
-tc=12 # number of txt clients
-mc=8 # number of img+txt clients
-cncntrtn=0.5 # concentration parameter for Dirichlet distribution
-c=0.25 # sampling ratio for clients
-nt=8 # number of threads for parallel training
-b=96 # batch size
-root='' # root path of the dataset
+goal="${GOAL:-YourGoal}"
+root="${DATA_ROOT_PREFIX:-}"
+out_dir="${FEDCOLA_OUT_DIR:-outputs/fedtoa_compare/fedcola_coco_mid}"
+log_file="${FEDCOLA_LOG_FILE:-logs/fedtoa_compare/fedcola_coco_mid_$(fedtoa_ts).log}"
 
-rounds=3
-local_epochs=1
-student_clients=$((ic + tc))
-log_file="logs/fedtoa_compare/fedcola_coco_short_$(date +%Y%m%d_%H%M%S).log"
-mkdir -p "$(dirname "$log_file")"
+ic="${IC:-12}"          # number of img clients
+tc="${TC:-12}"          # number of txt clients
+mc="${MC:-8}"           # number of img+txt clients
+cncntrtn="${CNCNTRTN:-0.5}"
+c="${C_RATIO:-0.25}"
+nt="${NUM_THREAD:-8}"
 
-echo "[fedcola-short] dataset=MS-COCO rounds=${rounds} local_epochs=${local_epochs}"
-echo "[fedcola-short] configured clients: teachers=${mc}, students=${student_clients} (img=${ic}, txt=${tc})"
-echo "[fedcola-short] writing run log to ${log_file}"
+b="${BATCH_SIZE:-16}"
+eval_b="${EVAL_BATCH_SIZE:-32}"
+rounds="${ROUNDS:-5}"
+local_epochs="${LOCAL_EPOCHS:-1}"
+
+fedtoa_prepare_paths "$out_dir" "$log_file"
+
+echo "[RUN_CONFIG] script=fedcola_coco_mid.sh"
+echo "[RUN_CONFIG] dataset=COCO"
+echo "[RUN_CONFIG] algorithm=fedavg"
+echo "[RUN_CONFIG] rounds=${rounds}"
+echo "[RUN_CONFIG] local_epochs=${local_epochs}"
+echo "[RUN_CONFIG] batch_size=${b}"
+echo "[RUN_CONFIG] eval_batch_size=${eval_b}"
+echo "[RUN_CONFIG] teachers=${mc}"
+echo "[RUN_CONFIG] students=$((ic + tc))"
+echo "[RUN_CONFIG] img_clients=${ic}"
+echo "[RUN_CONFIG] txt_clients=${tc}"
+echo "[RUN_CONFIG] output_dir=${out_dir}"
+echo "[RUN_CONFIG] log_file=${log_file}"
+
+echo "[PRECHECK] output directory ready: ${out_dir}"
+echo "[PRECHECK] dataset/algorithm/script identity: COCO / fedavg / fedcola_coco_mid.sh"
 
 python main.py \
   --exp_name FedCola \
+  --result_path "$out_dir" \
+  --log_path "$(dirname "$log_file")" \
   --shared_param attn \
   --share_scope modality \
   --colearn_param none \
@@ -33,35 +53,39 @@ python main.py \
   --with_aux \
   --aux_trained \
   --algorithm fedavg \
-  --seed 1 \
+  --seed "${SEED:-1}" \
   --multi-task \
   --datasets CIFAR100 AG_NEWS Coco Coco \
   --modalities img txt img+txt img+txt \
-  --data_paths ${root}data/cifar100 ${root}data/agnews ${root}data/coco ${root}data/coco \
-  --Ks $ic $tc $mc \
-  --Cs $c \
+  --data_paths "${root}data/cifar100" "${root}data/agnews" "${root}data/coco" "${root}data/coco" \
+  --Ks "$ic" "$tc" "$mc" \
+  --Cs "$c" \
   --test_size -1 \
   --split_type diri \
-  --cncntrtn $cncntrtn \
+  --cncntrtn "$cncntrtn" \
   --model_name mome_small_patch16 \
   --resize 224 \
   --imnorm \
   --eval_type global \
   --eval_every 1 \
   --eval_metrics acc1 \
-  --R ${rounds} \
-  --E ${local_epochs} \
-  --B $b \
+  --R "$rounds" \
+  --E "$local_epochs" \
+  --B "$b" \
   --beta1 0 \
   --optimizer AdamW \
   --lr 1e-4 \
   --lr_decay 0.99 \
   --lr_decay_step 1 \
   --criterion CrossEntropyLoss \
-  --num_thread $nt \
+  --num_thread "$nt" \
+  --loader_num_workers "${LOADER_NUM_WORKERS:-6}" \
+  --loader_pin_memory \
+  --loader_persistent_workers \
+  --loader_prefetch_factor "${LOADER_PREFETCH_FACTOR:-4}" \
   --use_bert_tokenizer \
   --pretrained \
-  --goal $goal \
+  --goal "$goal" \
   --equal_sampled \
-  --eval_batch_size 512 \
+  --eval_batch_size "$eval_b" \
   2>&1 | tee "$log_file"
