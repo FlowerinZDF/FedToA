@@ -21,8 +21,8 @@ b="${BATCH_SIZE:-128}"
 rounds="${ROUNDS:-3}"
 local_epochs="${LOCAL_EPOCHS:-1}"
 
-beta_topo="${BETA_TOPO:-1e-4}"
-gamma_spec="${GAMMA_SPEC:-1.0}"
+beta_topo="${BETA_TOPO:-0.2}"
+gamma_spec="${GAMMA_SPEC:-0.0}"
 eta_lip="${ETA_LIP:-0.0}"
 warmup_rounds="${WARMUP_ROUNDS:-5}"
 warmup_start_beta="${WARMUP_START_BETA:-0.0}"
@@ -89,8 +89,8 @@ python main.py \
   --fedtoa_prompt_only \
   --freeze_backbone \
   --use_topo \
-  --use_spec \
-  --use_lip \
+  --no-use_spec \
+  --no-use_lip \
   --tau 0.2 \
   --eig_k 4 \
   --topk_edges "$topk_edges" \
@@ -101,6 +101,8 @@ python main.py \
   --fedtoa_topo_warmup_mode "$warmup_mode" \
   --gamma_spec "$gamma_spec" \
   --eta_lip "$eta_lip" \
+  --fedtoa_retrieval_task_weight "${FEDTOA_RETRIEVAL_TASK_WEIGHT:-1.0}" \
+  --fedtoa_aux_task_weight "${FEDTOA_AUX_TASK_WEIGHT:-0.2}" \
   --prompt_len 10 \
   --diagonal_eps 1e-4 \
   2>&1 | tee "$log_file"

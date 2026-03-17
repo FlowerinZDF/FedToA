@@ -429,6 +429,13 @@ class FedtoaClient(FedavgClient):
         progress = max(float(comm_round), 0.0) / max(float(warmup_rounds), 1.0)
         return start_beta + (target_beta - start_beta) * progress
 
+    def _task_weight_policy(self) -> Tuple[float, float, str]:
+        retrieval_weight = float(getattr(self.args, "fedtoa_retrieval_task_weight", 1.0))
+        aux_weight = float(getattr(self.args, "fedtoa_aux_task_weight", 0.2))
+        retrieval_driven = str(getattr(self, "task", "")).lower() == "rtv"
+        objective_mode = "retrieval_primary" if retrieval_driven else "auxiliary_retrieval_guided"
+        return retrieval_weight, aux_weight, objective_mode
+
     def _student_forward(self, batch):
         targets: Optional[torch.Tensor] = None
 
@@ -660,9 +667,12 @@ class FedtoaClient(FedavgClient):
                 raw_topology_groups = topology_groups
                 topology_groups = self._map_groups_to_table(topology_groups, num_classes)
 
-                task_source = "supervised"
+                retrieval_task_weight, aux_task_weight, objective_mode = self._task_weight_policy()
+                retrieval_loss = self._task_fallback_loss(feats=feats, group_ids=topology_groups, logits=logits)
+                aux_loss = retrieval_loss.new_tensor(0.0)
+                task_source = "retrieval_only"
                 if targets is None:
-                    task_loss = self._task_fallback_loss(feats=feats, group_ids=topology_groups, logits=logits)
+                    task_loss = retrieval_task_weight * retrieval_loss
                     task_source = "fallback_missing_targets"
                     if not self._fedtoa_warned_missing_task_target:
                         warnings.warn(
@@ -671,20 +681,21 @@ class FedtoaClient(FedavgClient):
                         )
                         self._fedtoa_warned_missing_task_target = True
                 else:
-                    task_loss = criterion(logits.to(targets.device), targets)
+                    aux_loss = criterion(logits.to(targets.device), targets)
                     selected_names = list(getattr(self, "_fedtoa_prompt_trainable_names", ()))
                     if diagnostics_enabled and not task_connectivity_checked:
                         task_connectivity_nonzero = self._task_connected_nonzero_grad_names(
-                            task_loss=task_loss,
+                            task_loss=aux_loss,
                             selected_names=selected_names,
                         )
                         task_connectivity_use_fallback = len(task_connectivity_nonzero) == 0
                         task_connectivity_checked = True
                     if task_connectivity_use_fallback:
-                        task_loss = self._task_fallback_loss(feats=feats, group_ids=topology_groups, logits=logits)
+                        task_loss = retrieval_task_weight * retrieval_loss
                         task_source = "fallback_disconnected_supervised"
                     else:
-                        task_source = "supervised_connected"
+                        task_loss = retrieval_task_weight * retrieval_loss + aux_task_weight * aux_loss
+                        task_source = "retrieval_plus_aux"
 
                 if task_source.startswith("fallback") and not torch.isfinite(task_loss):
                     if not self._fedtoa_warned_nonfinite_fallback_task_loss:
@@ -711,6 +722,7 @@ class FedtoaClient(FedavgClient):
                 support_mask = local_support & active_classes
                 blueprint_mask = self.global_blueprint.topology_mask.to(self.device).to(dtype=torch.bool)
 
+                topo_loss_raw = task_loss.new_tensor(0.0)
                 topo_loss = task_loss.new_tensor(0.0)
                 active_edge_count = 0
                 if use_topo:
@@ -765,11 +777,20 @@ class FedtoaClient(FedavgClient):
                         )
                         active_edge_debug_logged = True
                     if active_edge_count > 0:
-                        topo_loss = masked_topology_loss(
+                        topo_target = self.global_blueprint.topology_mean.to(self.device)
+                        topo_loss_raw = masked_topology_loss(
                             local_topology=local_topology,
-                            global_topology=self.global_blueprint.topology_mean.to(self.device),
+                            global_topology=topo_target,
                             edge_mask=valid_edges_no_diag,
                             class_support_mask=support_mask,
+                            normalize=False,
+                        )
+                        topo_loss = masked_topology_loss(
+                            local_topology=local_topology,
+                            global_topology=topo_target,
+                            edge_mask=valid_edges_no_diag,
+                            class_support_mask=support_mask,
+                            normalize=True,
                         )
                     elif not topo_skip_logged:
                         logger.info(
@@ -892,12 +913,19 @@ class FedtoaClient(FedavgClient):
 
                 last_metrics = {
                     "task_loss": float(task_loss.detach().cpu()),
-                    "topo_loss_raw": float(topo_loss.detach().cpu()),
+                    "retrieval_loss": float(retrieval_loss.detach().cpu()),
+                    "aux_loss": float(aux_loss.detach().cpu()),
+                    "retrieval_task_weight": float(retrieval_task_weight),
+                    "aux_task_weight": float(aux_task_weight),
+                    "objective_mode": objective_mode,
+                    "topo_loss_raw": float(topo_loss_raw.detach().cpu()),
+                    "topo_loss_normalized": float(topo_loss.detach().cpu()),
                     "topo_loss_used": float(topo_loss.detach().cpu()),
                     "active_edge_count": active_edge_count,
                     "effective_beta_topo": float(beta_effective),
                     "scaled_topo_term": float((beta_effective * topo_loss).detach().cpu()),
                     "spec_loss": float(spec_loss.detach().cpu()),
+                    "scaled_spec_term": float((gamma * spec_loss).detach().cpu()),
                     "lip_loss": float(lip_loss.detach().cpu()),
                     "total_loss": float(total_loss.detach().cpu()),
                     "total_loss_requires_grad": bool(total_loss.requires_grad),
@@ -916,12 +944,19 @@ class FedtoaClient(FedavgClient):
         loss_value = float(last_metrics.get("total_loss", 0.0))
         metric_payload = {
             "task_loss": float(last_metrics.get("task_loss", 0.0)),
+            "retrieval_loss": float(last_metrics.get("retrieval_loss", 0.0)),
+            "aux_loss": float(last_metrics.get("aux_loss", 0.0)),
+            "retrieval_task_weight": float(last_metrics.get("retrieval_task_weight", 1.0)),
+            "aux_task_weight": float(last_metrics.get("aux_task_weight", 0.0)),
+            "objective_mode": str(last_metrics.get("objective_mode", "unknown")),
             "topo_loss_raw": float(last_metrics.get("topo_loss_raw", 0.0)),
+            "topo_loss_normalized": float(last_metrics.get("topo_loss_normalized", 0.0)),
             "topo_loss_used": float(last_metrics.get("topo_loss_used", 0.0)),
             "active_edge_count": int(last_metrics.get("active_edge_count", 0)),
             "effective_beta_topo": float(last_metrics.get("effective_beta_topo", beta_effective)),
             "scaled_topo_term": float(last_metrics.get("scaled_topo_term", 0.0)),
             "spec_loss": float(last_metrics.get("spec_loss", 0.0)),
+            "scaled_spec_term": float(last_metrics.get("scaled_spec_term", 0.0)),
             "lip_loss": float(last_metrics.get("lip_loss", 0.0)),
             "total_loss": loss_value,
             "total_loss_requires_grad": bool(last_metrics.get("total_loss_requires_grad", False)),
@@ -936,14 +971,22 @@ class FedtoaClient(FedavgClient):
             "loss_finite": dict(last_metrics.get("loss_finite", {})),
         }
         logger.info(
-            "[FEDTOA][TRAIN_METRICS] client=%s round=%s task_source=%s task_loss=%.6f topo_loss_used=%.6f scaled_topo_term=%.6f spec_loss=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f finite(task/topo/spec/total)=%s/%s/%s/%s prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
+            "[FEDTOA][TRAIN_METRICS] client=%s round=%s objective_mode=%s retrieval_driven=%s task_source=%s retrieval_w=%.3f aux_w=%.3f task_loss=%.6f retrieval_loss=%.6f aux_loss=%.6f topo_loss_raw=%.6f topo_loss_normalized=%.6f scaled_topo_term=%.6f spec_loss=%.6f scaled_spec_term=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f finite(task/topo/spec/total)=%s/%s/%s/%s prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
             self.id,
             int(getattr(self.args, "fedtoa_comm_round", 0)),
+            metric_payload["objective_mode"],
+            bool(str(getattr(self, "task", "")).lower() == "rtv"),
             metric_payload["task_source"],
+            metric_payload["retrieval_task_weight"],
+            metric_payload["aux_task_weight"],
             metric_payload["task_loss"],
-            metric_payload["topo_loss_used"],
+            metric_payload["retrieval_loss"],
+            metric_payload["aux_loss"],
+            metric_payload["topo_loss_raw"],
+            metric_payload["topo_loss_normalized"],
             metric_payload["scaled_topo_term"],
             metric_payload["spec_loss"],
+            metric_payload["scaled_spec_term"],
             metric_payload["lip_loss"],
             metric_payload["active_edge_count"],
             metric_payload["effective_beta_topo"],
@@ -962,13 +1005,19 @@ class FedtoaClient(FedavgClient):
             final_epoch: {
                 "loss": loss_value,
                 "task_loss": metric_payload["task_loss"],
+                "retrieval_loss": metric_payload["retrieval_loss"],
+                "aux_loss": metric_payload["aux_loss"],
+                "retrieval_task_weight": metric_payload["retrieval_task_weight"],
+                "aux_task_weight": metric_payload["aux_task_weight"],
                 "topo_loss": metric_payload["topo_loss_used"],
                 "topo_loss_raw": metric_payload["topo_loss_raw"],
+                "topo_loss_normalized": metric_payload["topo_loss_normalized"],
                 "topo_loss_used": metric_payload["topo_loss_used"],
                 "active_edge_count": metric_payload["active_edge_count"],
                 "effective_beta_topo": metric_payload["effective_beta_topo"],
                 "scaled_topo_term": metric_payload["scaled_topo_term"],
                 "spec_loss": metric_payload["spec_loss"],
+                "scaled_spec_term": metric_payload["scaled_spec_term"],
                 "lip_loss": metric_payload["lip_loss"],
                 "total_loss": metric_payload["total_loss"],
                 "metrics": metric_payload,
@@ -987,11 +1036,35 @@ class FedtoaClient(FedavgClient):
         if not prompt_only or self._fedtoa_upload_base_state is None:
             return sd
 
-        prompt_tokens = self._prompt_name_tokens()
-        normalized_prompt_tokens = self._normalize_name_tokens(prompt_tokens)
+        allowed_param_names = set(getattr(self, "_fedtoa_prompt_trainable_names", ()))
+        uploaded_param_bytes = 0
+        uploaded_param_elems = 0
+        frozen_param_bytes = 0
         for key in sd.keys():
-            if self._param_matches_prompt_tokens(key, normalized_prompt_tokens):
+            base_tensor = self._fedtoa_upload_base_state.get(key)
+            if base_tensor is None or not torch.is_tensor(sd[key]) or key not in self.model.state_dict():
                 continue
-            if key in self._fedtoa_upload_base_state:
-                sd[key] = self._fedtoa_upload_base_state[key].clone()
+            is_allowed = key in allowed_param_names
+            if is_allowed:
+                uploaded_param_bytes += int(sd[key].numel() * sd[key].element_size())
+                uploaded_param_elems += int(sd[key].numel())
+            else:
+                frozen_param_bytes += int(sd[key].numel() * sd[key].element_size())
+                sd[key] = base_tensor.clone()
+
+        self._fedtoa_last_upload_stats = {
+            "uploaded_param_bytes": int(uploaded_param_bytes),
+            "uploaded_param_elems": int(uploaded_param_elems),
+            "frozen_param_bytes": int(frozen_param_bytes),
+            "allowed_param_count": int(len(allowed_param_names)),
+        }
+        logger.info(
+            "[FEDTOA][UPLOAD] client=%s round=%s allowed_param_count=%s uploaded_param_elems=%s uploaded_param_bytes=%s frozen_param_bytes=%s",
+            self.id,
+            int(getattr(self.args, "fedtoa_comm_round", 0)),
+            len(allowed_param_names),
+            uploaded_param_elems,
+            uploaded_param_bytes,
+            frozen_param_bytes,
+        )
         return sd

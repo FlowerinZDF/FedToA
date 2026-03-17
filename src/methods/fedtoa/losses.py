@@ -11,6 +11,8 @@ def masked_topology_loss(
     edge_mask: torch.Tensor,
     class_support_mask: torch.Tensor,
     reduction: str = "mean",
+    normalize: bool = True,
+    eps: float = 1e-6,
 ) -> torch.Tensor:
     """Topology alignment loss with explicit edge and class support masking.
 
@@ -20,6 +22,10 @@ def masked_topology_loss(
         edge_mask: Server-approved edge mask, shape ``[C, C]``.
         class_support_mask: Student class support mask, shape ``[C]``.
         reduction: ``"mean"`` or ``"sum"`` over valid edges.
+        normalize: If ``True``, divide edge-wise residuals by a symmetric
+            magnitude scale ``0.5 * (|local| + |global|) + eps`` before squaring.
+            This keeps topology loss numerically comparable to task losses.
+        eps: Stabilizer for normalization denominator.
 
     Returns:
         Scalar topology loss. Returns zero if no valid edge exists.
@@ -32,7 +38,11 @@ def masked_topology_loss(
     support_edges = support.unsqueeze(0) & support.unsqueeze(1)
     valid_edges = edge_mask.to(dtype=torch.bool) & support_edges
 
-    diff_sq = (local_topology - global_topology).pow(2)
+    if normalize:
+        denom = 0.5 * (local_topology.abs() + global_topology.abs()) + float(eps)
+        diff_sq = ((local_topology - global_topology) / denom).pow(2)
+    else:
+        diff_sq = (local_topology - global_topology).pow(2)
     selected = diff_sq[valid_edges]
     if selected.numel() == 0:
         return diff_sq.new_tensor(0.0)

@@ -297,6 +297,8 @@ if __name__ == "__main__":
     parser.add_argument('--fedtoa_topo_warmup_rounds', type=int, default=5, help='communication rounds for beta_topo warmup; <=0 disables warmup')
     parser.add_argument('--fedtoa_topo_warmup_start_beta', type=float, default=0.0, help='initial beta_topo used at round 0 during FedToA warmup')
     parser.add_argument('--fedtoa_topo_warmup_mode', type=str, default='linear', choices=['linear'], help='FedToA topology warmup schedule mode')
+    parser.add_argument('--fedtoa_retrieval_task_weight', type=float, default=1.0, help='FedToA student weight for retrieval-driven task objectives')
+    parser.add_argument('--fedtoa_aux_task_weight', type=float, default=0.2, help='FedToA student weight for auxiliary classification objectives')
 
     ###################
     # Model arguments #

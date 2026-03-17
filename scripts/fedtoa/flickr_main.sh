@@ -55,12 +55,16 @@ python main.py \
   --equal_sampled \
   --eval_batch_size 512 \
   --use_topo \
-  --use_spec \
-  --use_lip \
+  --no-use_spec \
+  --no-use_lip \
+  --fedtoa_prompt_only \
+  --freeze_backbone \
   --tau 0.2 \
   --eig_k 4 \
-  --beta_topo 1.0 \
-  --gamma_spec 1.0 \
-  --eta_lip 1.0 \
+  --beta_topo 0.2 \
+  --gamma_spec 0.0 \
+  --eta_lip 0.0 \
+  --fedtoa_retrieval_task_weight 1.0 \
+  --fedtoa_aux_task_weight 0.2 \
   --prompt_len 10 \
   --diagonal_eps 1e-4
