@@ -144,7 +144,7 @@ class FedtoaClient(FedavgClient):
         active_modality_index = 0 if self.modality == "img" else 1 if self.modality == "txt" else None
 
         prompt_candidates = []
-        for name, param in self.model.named_parameters():
+        for name, _ in self.model.named_parameters():
             if self._param_matches_prompt_tokens(name, normalized_prompt_tokens):
                 prompt_candidates.append(name)
 
@@ -176,82 +176,124 @@ class FedtoaClient(FedavgClient):
         matched_prompt_names: List[str] = []
         selection_reasons: Dict[str, str] = {}
         inactive_prompt_matches: List[str] = []
+        selected_name_set = set()
+
+        def _add_names(candidates: List[str], reason: str, max_items: Optional[int] = None) -> List[str]:
+            added_names: List[str] = []
+            for candidate_name in candidates:
+                if max_items is not None and len(added_names) >= max_items:
+                    break
+                if candidate_name in selected_name_set:
+                    continue
+                param = name_to_param.get(candidate_name)
+                if param is None:
+                    continue
+                param.requires_grad = True
+                prompt_params.append(param)
+                matched_prompt_names.append(candidate_name)
+                selected_name_set.add(candidate_name)
+                selection_reasons[candidate_name] = reason
+                added_names.append(candidate_name)
+            return added_names
+
+        p1_candidates: List[str] = []
         for name, param in named_params:
             if not self._param_matches_prompt_tokens(name, normalized_prompt_tokens):
                 continue
             if not _is_active_branch_param(name):
                 inactive_prompt_matches.append(name)
                 continue
-            param.requires_grad = True
-            prompt_params.append(param)
-            matched_prompt_names.append(name)
-            selection_reasons[name] = "prompt_like"
+            p1_candidates.append(name)
 
-        lightweight_fallback_names: List[str] = []
+        policy_added_names: Dict[str, List[str]] = {
+            "p1_prompt_like_params": _add_names(p1_candidates, reason="p1_prompt_like_params"),
+        }
+        policy_order = ["p1_prompt_like_params"]
+
         if active_modality_index is not None:
-            branch_prefixes = (
-                f"heads.{active_modality_index}.",
-                f"projections.{active_modality_index}.",
-                f"projectors.{active_modality_index}.",
-            )
             txt_large_embedding_names = {
-                f"embeddings.{active_modality_index}.word_embeddings.weight",
-                f"embeddings.{active_modality_index}.position_embeddings.weight",
-                f"embeddings.{active_modality_index}.token_type_embeddings.weight",
+                "embeddings.1.text_embeddings.word_embeddings.weight",
+                "embeddings.1.text_embeddings.position_embeddings.weight",
+                "embeddings.1.text_embeddings.token_type_embeddings.weight",
+                "embeddings.1.word_embeddings.weight",
+                "embeddings.1.position_embeddings.weight",
+                "embeddings.1.token_type_embeddings.weight",
             }
 
             def _allow_lightweight_branch_param(candidate_name: str) -> bool:
                 if self.modality != "txt":
                     return True
                 return candidate_name not in txt_large_embedding_names
-
-            def _add_candidates(candidates: List[str], reason: str) -> None:
-                for candidate_name in candidates:
-                    if candidate_name in set(matched_prompt_names):
-                        continue
-                    param = name_to_param.get(candidate_name)
-                    if param is None:
-                        continue
-                    param.requires_grad = True
-                    prompt_params.append(param)
-                    matched_prompt_names.append(candidate_name)
-                    lightweight_fallback_names.append(candidate_name)
-                    selection_reasons[candidate_name] = reason
-
-            branch_head_candidates = []
-            for name, _ in named_params:
-                if not _is_active_branch_param(name):
-                    continue
-                if any(name.startswith(prefix) for prefix in branch_prefixes):
-                    if (name.endswith("weight") or name.endswith("bias")) and _allow_lightweight_branch_param(name):
-                        branch_head_candidates.append(name)
-            branch_head_candidates = sorted(dict.fromkeys(branch_head_candidates))[:8]
-            _add_candidates(branch_head_candidates, reason="branch_head_projection")
-
-            norm_candidates = [name for name in ("norm.weight", "norm.bias") if name in name_to_param]
-            _add_candidates(norm_candidates, reason="norm_support")
-
-            block_norm_candidates = [
-                name
-                for name in name_to_param
-                if (
-                    name.startswith(f"blockses.{active_modality_index}.")
-                    and ".norm" in name
-                    and (name.endswith("weight") or name.endswith("bias"))
+            p2_head_candidates = sorted(
+                name for name in name_to_param
+                if _is_active_branch_param(name)
+                and (
+                    name.startswith(f"heads.{active_modality_index}.")
+                    or name.startswith(f"projections.{active_modality_index}.")
+                    or name.startswith(f"projectors.{active_modality_index}.")
                 )
-            ]
-            block_norm_candidates = sorted(dict.fromkeys(block_norm_candidates))[:8]
-            _add_candidates(block_norm_candidates, reason="branch_norm_support")
+                and (name.endswith("weight") or name.endswith("bias"))
+                and _allow_lightweight_branch_param(name)
+            )
+            policy_added_names["p2_active_branch_head"] = _add_names(
+                p2_head_candidates, reason="p2_active_branch_head", max_items=16
+            )
+            policy_order.append("p2_active_branch_head")
 
-            cls_candidates = [
-                name
-                for name in (
-                    f"embeddings.{active_modality_index}.cls_token",
-                    f"embeddings.{active_modality_index}.reg_token",
+            p3_norm_candidates = sorted(
+                name for name in name_to_param
+                if _is_active_branch_param(name)
+                and (name.endswith("weight") or name.endswith("bias"))
+                and (
+                    ".norm" in name.lower()
+                    or "layernorm" in name.lower()
+                    or name.startswith("norm.")
                 )
-                if name in name_to_param
-            ]
-            _add_candidates(cls_candidates, reason="branch_token")
+                and _allow_lightweight_branch_param(name)
+            )
+            policy_added_names["p3_active_branch_norm"] = _add_names(
+                p3_norm_candidates, reason="p3_active_branch_norm", max_items=24
+            )
+            policy_order.append("p3_active_branch_norm")
+
+            p4_small_input_projection_candidates: List[str] = []
+            if self.modality == "img":
+                p4_small_input_projection_candidates.extend(
+                    ["embeddings.0.embed.proj.weight", "embeddings.0.embed.proj.bias"]
+                )
+            elif self.modality == "txt":
+                p4_small_input_projection_candidates.extend(
+                    [
+                        "embeddings.1.text_embeddings.LayerNorm.weight",
+                        "embeddings.1.text_embeddings.LayerNorm.bias",
+                    ]
+                )
+                p4_small_input_projection_candidates.extend(
+                    sorted(
+                        name for name in name_to_param
+                        if _is_active_branch_param(name)
+                        and _allow_lightweight_branch_param(name)
+                        and (name.endswith("weight") or name.endswith("bias"))
+                        and (
+                            ".proj." in name
+                            or ".projection" in name
+                            or "text_projection" in name
+                            or "pooler" in name
+                        )
+                    )
+                )
+            policy_added_names["p4_active_branch_small_input_projection"] = _add_names(
+                p4_small_input_projection_candidates,
+                reason="p4_active_branch_small_input_projection",
+                max_items=10,
+            )
+            policy_order.append("p4_active_branch_small_input_projection")
+
+            p5_global_norm = [name for name in ("norm.weight", "norm.bias") if name in name_to_param]
+            policy_added_names["p5_global_norm_support"] = _add_names(
+                p5_global_norm, reason="p5_global_norm_support"
+            )
+            policy_order.append("p5_global_norm_support")
 
         used_fallback = False
         if len(prompt_params) == 0:
@@ -264,6 +306,8 @@ class FedtoaClient(FedavgClient):
             fallback.requires_grad = True
             prompt_params.append(fallback)
             used_fallback = True
+            policy_added_names["p6_fallback_placeholder"] = ["_fedtoa_prompt_fallback"]
+            policy_order.append("p6_fallback_placeholder")
 
         if not prompt_only:
             for _, param in self.model.named_parameters():
@@ -275,18 +319,20 @@ class FedtoaClient(FedavgClient):
         self._fedtoa_prompt_used_fallback = used_fallback
         self._fedtoa_prompt_tokens = tuple(prompt_tokens)
         selected_param_elems = int(sum(name_to_param[name].numel() for name in matched_prompt_names if name in name_to_param))
+        self._fedtoa_prompt_selected_param_elems = selected_param_elems
 
         logger.info(
-            "[FEDTOA][PROMPT_MATCH] client=%s modality=%s configured_tokens=%s matched_count=%s matched_param_elems=%s matched_names=%s matched_reasons=%s inactive_branch_matches=%s lightweight_fallback_names=%s fallback_used=%s",
+            "[FEDTOA][PROMPT_MATCH] client=%s modality=%s configured_tokens=%s policy_order=%s matched_count=%s matched_param_elems=%s matched_names=%s matched_reasons=%s policy_added_names=%s inactive_branch_matches=%s fallback_used=%s",
             self.id,
             self.modality,
             list(prompt_tokens),
+            policy_order,
             len(matched_prompt_names),
             selected_param_elems,
             matched_prompt_names,
             selection_reasons,
+            policy_added_names,
             inactive_prompt_matches,
-            lightweight_fallback_names,
             used_fallback,
         )
 
@@ -431,7 +477,7 @@ class FedtoaClient(FedavgClient):
 
     def _task_weight_policy(self) -> Tuple[float, float, str]:
         retrieval_weight = float(getattr(self.args, "fedtoa_retrieval_task_weight", 1.0))
-        aux_weight = float(getattr(self.args, "fedtoa_aux_task_weight", 0.05))
+        aux_weight = float(getattr(self.args, "fedtoa_aux_task_weight", 0.1))
         objective_mode = str(getattr(self.args, "fedtoa_student_objective", "retrieval_plus_aux")).strip().lower()
         if objective_mode not in {"retrieval_only", "retrieval_plus_aux", "supervised_only"}:
             raise ValueError(f"Unsupported fedtoa_student_objective={objective_mode}.")
@@ -671,6 +717,8 @@ class FedtoaClient(FedavgClient):
                 retrieval_task_weight, aux_task_weight, objective_mode = self._task_weight_policy()
                 retrieval_loss = self._task_fallback_loss(feats=feats, group_ids=topology_groups, logits=logits)
                 aux_loss = retrieval_loss.new_tensor(0.0)
+                if targets is not None:
+                    aux_loss = criterion(logits.to(targets.device), targets)
                 unique_groups = int(torch.unique(topology_groups).numel())
                 retrieval_available = bool(feats.ndim == 2 and feats.shape[0] >= 2 and unique_groups < int(feats.shape[0]))
                 retrieval_driven_step = False
@@ -681,47 +729,29 @@ class FedtoaClient(FedavgClient):
                     if not retrieval_available:
                         task_source = "retrieval_only_degenerate_batch"
                 elif objective_mode == "retrieval_plus_aux":
-                    task_loss = retrieval_task_weight * retrieval_loss
+                    task_loss = retrieval_task_weight * retrieval_loss + aux_task_weight * aux_loss
                     retrieval_driven_step = True
                     if targets is None:
                         if not self._fedtoa_warned_missing_task_target:
                             warnings.warn(
-                                "FedToA student task targets unavailable in current batch; running retrieval-only task path.",
+                                "FedToA student task targets unavailable in current batch; auxiliary CE term set to zero.",
                                 RuntimeWarning,
                             )
                             self._fedtoa_warned_missing_task_target = True
                         task_source = "retrieval_plus_aux_missing_targets"
-                    else:
-                        aux_loss = criterion(logits.to(targets.device), targets)
-                        task_loss = task_loss + aux_task_weight * aux_loss
-                        task_source = "retrieval_plus_aux"
                 else:
                     # supervised_only is a strict fallback and should only be used
                     # when retrieval signal is genuinely unavailable.
                     if targets is not None:
-                        aux_loss = criterion(logits.to(targets.device), targets)
-                    if retrieval_available:
-                        task_loss = retrieval_task_weight * retrieval_loss + aux_task_weight * aux_loss
-                        retrieval_driven_step = True
-                        task_source = "supervised_only_overridden_to_retrieval_plus_aux"
-                    else:
                         task_loss = aux_loss
                         task_source = "supervised_only"
-
-                if targets is not None and objective_mode != "supervised_only":
-                    aux_loss = criterion(logits.to(targets.device), targets)
-                    selected_names = list(getattr(self, "_fedtoa_prompt_trainable_names", ()))
-                    if diagnostics_enabled and not task_connectivity_checked:
-                        task_connectivity_nonzero = self._task_connected_nonzero_grad_names(
-                            task_loss=aux_loss,
-                            selected_names=selected_names,
-                        )
-                        task_connectivity_use_fallback = len(task_connectivity_nonzero) == 0
-                        task_connectivity_checked = True
-                    if task_connectivity_use_fallback:
+                    elif retrieval_available:
                         task_loss = retrieval_task_weight * retrieval_loss
-                        task_source = f"{task_source}_fallback_disconnected_supervised"
                         retrieval_driven_step = True
+                        task_source = "supervised_only_fallback_to_retrieval_only"
+                    else:
+                        task_loss = aux_loss
+                        task_source = "supervised_only_missing_targets"
 
                 if task_source.startswith("fallback") and not torch.isfinite(task_loss):
                     if not self._fedtoa_warned_nonfinite_fallback_task_loss:
@@ -830,16 +860,20 @@ class FedtoaClient(FedavgClient):
                 min_active_edges = max(int(getattr(self.args, "fedtoa_topo_min_active_edges", 8)), 0)
                 topo_loss_cap = float(getattr(self.args, "fedtoa_topo_loss_cap", 1.0))
                 topo_ratio_cap = float(getattr(self.args, "fedtoa_topo_task_ratio_cap", 0.25))
+                topo_loss_before_cap = topo_loss_used
+                topo_ratio_bound = task_loss.new_tensor(0.0)
                 if active_edge_count < min_active_edges:
                     topo_loss_used = task_loss.new_tensor(0.0)
                 else:
                     if topo_loss_cap > 0:
                         topo_loss_used = torch.clamp(topo_loss_used, max=topo_loss_cap)
                     if topo_ratio_cap > 0 and beta_effective > 0:
-                        max_topo_term = torch.abs(task_loss.detach()) * topo_ratio_cap
+                        detached_task_mag = torch.abs(task_loss.detach())
+                        max_topo_term = detached_task_mag * topo_ratio_cap
+                        topo_ratio_bound = max_topo_term / max(beta_effective, 1e-12)
                         topo_loss_used = torch.minimum(
                             topo_loss_used,
-                            max_topo_term / max(beta_effective, 1e-12),
+                            topo_ratio_bound,
                         )
 
                 spec_loss = task_loss.new_tensor(0.0)
@@ -964,9 +998,13 @@ class FedtoaClient(FedavgClient):
                     "topo_loss_raw": float(topo_loss_raw.detach().cpu()),
                     "topo_loss_normalized": float(topo_loss_normalized.detach().cpu()),
                     "topo_loss_used": float(topo_loss_used.detach().cpu()),
+                    "topo_loss_before_cap": float(topo_loss_before_cap.detach().cpu()),
                     "active_edge_count": active_edge_count,
                     "effective_beta_topo": float(beta_effective),
                     "scaled_topo_term": float((beta_effective * topo_loss_used).detach().cpu()),
+                    "topo_ratio_bound": float(topo_ratio_bound.detach().cpu()),
+                    "topo_loss_cap": float(topo_loss_cap),
+                    "topo_task_ratio_cap": float(topo_ratio_cap),
                     "spec_loss": float(spec_loss.detach().cpu()),
                     "scaled_spec_term": float((gamma * spec_loss).detach().cpu()),
                     "lip_loss": float(lip_loss.detach().cpu()),
@@ -996,9 +1034,13 @@ class FedtoaClient(FedavgClient):
             "topo_loss_raw": float(last_metrics.get("topo_loss_raw", 0.0)),
             "topo_loss_normalized": float(last_metrics.get("topo_loss_normalized", 0.0)),
             "topo_loss_used": float(last_metrics.get("topo_loss_used", 0.0)),
+            "topo_loss_before_cap": float(last_metrics.get("topo_loss_before_cap", 0.0)),
             "active_edge_count": int(last_metrics.get("active_edge_count", 0)),
             "effective_beta_topo": float(last_metrics.get("effective_beta_topo", beta_effective)),
             "scaled_topo_term": float(last_metrics.get("scaled_topo_term", 0.0)),
+            "topo_ratio_bound": float(last_metrics.get("topo_ratio_bound", 0.0)),
+            "topo_loss_cap": float(last_metrics.get("topo_loss_cap", 0.0)),
+            "topo_task_ratio_cap": float(last_metrics.get("topo_task_ratio_cap", 0.0)),
             "spec_loss": float(last_metrics.get("spec_loss", 0.0)),
             "scaled_spec_term": float(last_metrics.get("scaled_spec_term", 0.0)),
             "lip_loss": float(last_metrics.get("lip_loss", 0.0)),
@@ -1015,7 +1057,7 @@ class FedtoaClient(FedavgClient):
             "loss_finite": dict(last_metrics.get("loss_finite", {})),
         }
         logger.info(
-            "[FEDTOA][TRAIN_METRICS] client=%s round=%s objective_mode=%s retrieval_driven=%s task_source=%s retrieval_w=%.3f aux_w=%.3f task_loss=%.6f retrieval_loss=%.6f aux_loss=%.6f topo_loss_raw=%.6f topo_loss_normalized=%.6f scaled_topo_term=%.6f spec_loss=%.6f scaled_spec_term=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f finite(task/topo/spec/total)=%s/%s/%s/%s prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
+            "[FEDTOA][TRAIN_METRICS] client=%s round=%s objective_mode=%s retrieval_driven=%s task_source=%s retrieval_w=%.3f aux_w=%.3f task_loss=%.6f retrieval_loss=%.6f aux_loss=%.6f topo_loss_raw=%.6f topo_loss_normalized=%.6f topo_loss_before_cap=%.6f topo_ratio_bound=%.6f topo_loss_cap=%.6f topo_task_ratio_cap=%.6f scaled_topo_term=%.6f spec_loss=%.6f scaled_spec_term=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f finite(task/topo/spec/total)=%s/%s/%s/%s prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
             self.id,
             int(getattr(self.args, "fedtoa_comm_round", 0)),
             metric_payload["objective_mode"],
@@ -1028,6 +1070,10 @@ class FedtoaClient(FedavgClient):
             metric_payload["aux_loss"],
             metric_payload["topo_loss_raw"],
             metric_payload["topo_loss_normalized"],
+            metric_payload["topo_loss_before_cap"],
+            metric_payload["topo_ratio_bound"],
+            metric_payload["topo_loss_cap"],
+            metric_payload["topo_task_ratio_cap"],
             metric_payload["scaled_topo_term"],
             metric_payload["spec_loss"],
             metric_payload["scaled_spec_term"],
@@ -1057,9 +1103,13 @@ class FedtoaClient(FedavgClient):
                 "topo_loss_raw": metric_payload["topo_loss_raw"],
                 "topo_loss_normalized": metric_payload["topo_loss_normalized"],
                 "topo_loss_used": metric_payload["topo_loss_used"],
+                "topo_loss_before_cap": metric_payload["topo_loss_before_cap"],
                 "active_edge_count": metric_payload["active_edge_count"],
                 "effective_beta_topo": metric_payload["effective_beta_topo"],
                 "scaled_topo_term": metric_payload["scaled_topo_term"],
+                "topo_ratio_bound": metric_payload["topo_ratio_bound"],
+                "topo_loss_cap": metric_payload["topo_loss_cap"],
+                "topo_task_ratio_cap": metric_payload["topo_task_ratio_cap"],
                 "spec_loss": metric_payload["spec_loss"],
                 "scaled_spec_term": metric_payload["scaled_spec_term"],
                 "lip_loss": metric_payload["lip_loss"],

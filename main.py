@@ -298,11 +298,11 @@ if __name__ == "__main__":
     parser.add_argument('--fedtoa_topo_warmup_start_beta', type=float, default=0.0, help='initial beta_topo used at round 0 during FedToA warmup')
     parser.add_argument('--fedtoa_topo_warmup_mode', type=str, default='linear', choices=['linear'], help='FedToA topology warmup schedule mode')
     parser.add_argument('--fedtoa_retrieval_task_weight', type=float, default=1.0, help='FedToA student weight for retrieval-driven task objectives')
-    parser.add_argument('--fedtoa_aux_task_weight', type=float, default=0.05, help='FedToA student weight for auxiliary classification objectives')
+    parser.add_argument('--fedtoa_aux_task_weight', type=float, default=0.1, help='FedToA student weight for auxiliary classification objectives')
     parser.add_argument('--fedtoa_student_objective', type=str, default='retrieval_plus_aux', choices=['retrieval_only', 'retrieval_plus_aux', 'supervised_only'], help='FedToA student objective policy')
     parser.add_argument('--fedtoa_topo_min_active_edges', type=int, default=8, help='minimum active edges required before applying topology regularization')
-    parser.add_argument('--fedtoa_topo_loss_cap', type=float, default=1.0, help='clip cap for normalized FedToA topology loss (<=0 disables clipping)')
-    parser.add_argument('--fedtoa_topo_task_ratio_cap', type=float, default=0.25, help='cap beta*topo term to this fraction of |task_loss| (<=0 disables ratio cap)')
+    parser.add_argument('--fedtoa_topo_loss_cap', type=float, default=0.5, help='clip cap for normalized FedToA topology loss (<=0 disables clipping)')
+    parser.add_argument('--fedtoa_topo_task_ratio_cap', type=float, default=0.10, help='cap beta*topo term to this fraction of |task_loss| (<=0 disables ratio cap)')
 
     ###################
     # Model arguments #
