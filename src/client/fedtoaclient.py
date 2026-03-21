@@ -1122,6 +1122,51 @@ class FedtoaClient(FedavgClient):
         return result_payload
 
     def update(self):
+        role = None
+
+        explicit_role = getattr(self, "fedtoa_role", None)
+        if explicit_role is None:
+            explicit_role = getattr(self, "is_teacher", None)
+            if isinstance(explicit_role, bool):
+                explicit_role = "teacher" if explicit_role else "student"
+        if explicit_role is None and hasattr(self, "args"):
+            explicit_role = getattr(self.args, "fedtoa_role", None)
+            if isinstance(explicit_role, bool):
+                explicit_role = "teacher" if explicit_role else "student"
+
+        if explicit_role is not None:
+            token = str(explicit_role).strip().lower()
+            if token in {"teacher", "student"}:
+                role = token
+
+        modality = str(getattr(self, "modality", "")).strip().lower()
+        if role is None:
+            if modality == "img+txt":
+                role = "teacher"
+            elif modality in {"img", "txt"}:
+                role = "student"
+            else:
+                role = "student"
+
+        if role == "teacher":
+            path = "local_train"
+            logger.info(
+                "[FEDTOA][DISPATCH] client=%s role=%s modality=%s path=%s",
+                self.id,
+                role,
+                modality,
+                path,
+            )
+            return super().update()
+
+        path = "local_train_student"
+        logger.info(
+            "[FEDTOA][DISPATCH] client=%s role=%s modality=%s path=%s",
+            self.id,
+            role,
+            modality,
+            path,
+        )
         return self.local_train_student(getattr(self.args, "E", 1))
 
     def upload(self):

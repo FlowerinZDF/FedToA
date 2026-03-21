@@ -272,6 +272,8 @@ class FedtoaServer(FedavgServer):
         update_results = {}
         for client_id in teacher_ids:
             client = self.clients[client_id]
+            client.fedtoa_role = "teacher"
+            client.is_teacher = True
             resolved_modality = self._bind_resolved_client_modality(client_id)
             self._prepare_client_for_round(client)
             self._align_client_model_layout(client, resolved_modality)
@@ -373,6 +375,8 @@ class FedtoaServer(FedavgServer):
 
         for client_id in student_ids:
             client = self.clients[client_id]
+            client.fedtoa_role = "student"
+            client.is_teacher = False
             resolved_modality = self._bind_resolved_client_modality(client_id)
             self._prepare_client_for_round(client)
             self._align_client_model_layout(client, resolved_modality)
