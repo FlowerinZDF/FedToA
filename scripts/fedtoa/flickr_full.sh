@@ -11,18 +11,26 @@ root="${DATA_ROOT_PREFIX:-}"
 out_dir="${FEDTOA_OUT_DIR:-outputs/fedtoa/flickr_full}"
 log_file="${FEDTOA_LOG_FILE:-logs/fedtoa/flickr_full_$(fedtoa_ts).log}"
 
+# client split aligned with FedCola
 ic="${IC:-12}"
 tc="${TC:-12}"
 mc="${MC:-8}"
 cncntrtn="${CNCNTRTN:-0.5}"
 c="${C_RATIO:-0.25}"
 nt="${NUM_THREAD:-8}"
+seed="${SEED:-1}"
 
+# full run aligned with original FedCola Flickr script
 rounds="${ROUNDS:-30}"
 local_epochs="${LOCAL_EPOCHS:-5}"
-b="${BATCH_SIZE:-112}"
-eval_b="${EVAL_BATCH_SIZE:-512}"
+b="${BATCH_SIZE:-32}"
+eval_b="${EVAL_BATCH_SIZE:-128}"
 
+# dataloader
+loader_workers="${LOADER_NUM_WORKERS:-6}"
+loader_prefetch="${LOADER_PREFETCH_FACTOR:-4}"
+
+# current practical FedToA defaults
 beta_topo="${BETA_TOPO:-0.05}"
 gamma_spec="${GAMMA_SPEC:-0.0}"
 eta_lip="${ETA_LIP:-0.0}"
@@ -38,9 +46,6 @@ topo_min_edges="${FEDTOA_TOPO_MIN_ACTIVE_EDGES:-8}"
 topo_loss_cap="${FEDTOA_TOPO_LOSS_CAP:-0.5}"
 topo_task_ratio_cap="${FEDTOA_TOPO_TASK_RATIO_CAP:-0.10}"
 
-loader_workers="${LOADER_NUM_WORKERS:-6}"
-loader_prefetch="${LOADER_PREFETCH_FACTOR:-4}"
-
 fedtoa_prepare_paths "$out_dir" "$log_file"
 
 fedtoa_print_run_config \
@@ -48,6 +53,9 @@ fedtoa_print_run_config \
   "$warmup_rounds" "$warmup_start_beta" "$warmup_mode" "true" "true" "$topk_edges" "$var_threshold" \
   "$out_dir" "$log_file"
 
+echo "[RUN_CONFIG] script=flickr_full.sh"
+echo "[RUN_CONFIG] dataset=Flickr30k"
+echo "[RUN_CONFIG] algorithm=fedtoa"
 echo "[RUN_CONFIG] rounds=${rounds}"
 echo "[RUN_CONFIG] local_epochs=${local_epochs}"
 echo "[RUN_CONFIG] batch_size=${b}"
@@ -59,6 +67,8 @@ echo "[RUN_CONFIG] topo_loss_cap=${topo_loss_cap}"
 echo "[RUN_CONFIG] topo_task_ratio_cap=${topo_task_ratio_cap}"
 echo "[RUN_CONFIG] loader_num_workers=${loader_workers}"
 echo "[RUN_CONFIG] loader_prefetch_factor=${loader_prefetch}"
+echo "[RUN_CONFIG] output_dir=${out_dir}"
+echo "[RUN_CONFIG] log_file=${log_file}"
 
 echo "[PRECHECK] output directory ready: ${out_dir}"
 echo "[PRECHECK] dataset/algorithm/script identity: Flickr30k / fedtoa / flickr_full.sh"
@@ -74,7 +84,7 @@ python main.py \
   --with_aux \
   --aux_trained \
   --algorithm fedtoa \
-  --seed "${SEED:-1}" \
+  --seed "$seed" \
   --multi-task \
   --datasets CIFAR100 AG_NEWS Flickr30k Coco \
   --modalities img txt img+txt img+txt \
@@ -109,6 +119,7 @@ python main.py \
   --goal "$goal" \
   --equal_sampled \
   --eval_batch_size "$eval_b" \
+  --no-detect_anomaly \
   --fedtoa_prompt_only \
   --freeze_backbone \
   --use_topo \
@@ -133,3 +144,6 @@ python main.py \
   --prompt_len 10 \
   --diagonal_eps 1e-4 \
   2>&1 | tee "$log_file"
+
+echo "[DONE] log: ${log_file}"
+echo "[DONE] output: ${out_dir}"
