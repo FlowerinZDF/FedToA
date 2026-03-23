@@ -38,6 +38,10 @@ _FEDTOA_DEFAULT_PROMPT_TOKENS: Tuple[str, ...] = (
 )
 
 
+def _sample_names(names: List[str], max_items: int = 8) -> List[str]:
+    return list(names[:max(0, int(max_items))])
+
+
 class FedtoaClient(FedavgClient):
     """FedToA client with student-side local adaptation support.
 
@@ -152,11 +156,11 @@ class FedtoaClient(FedavgClient):
         if getattr(self, "_fedtoa_prompt_candidate_log_round", None) != comm_round:
             self._fedtoa_prompt_candidate_log_round = comm_round
             logger.info(
-                "[FEDTOA][PROMPT_CANDIDATES] client=%s round=%s candidate_count=%s candidates=%s",
+                "[FEDTOA][PROMPT_CANDIDATES] client=%s round=%s candidate_count=%s candidate_sample=%s",
                 self.id,
                 comm_round,
                 len(prompt_candidates),
-                prompt_candidates,
+                _sample_names(prompt_candidates),
             )
 
         def _is_active_branch_param(name: str) -> bool:
@@ -322,17 +326,16 @@ class FedtoaClient(FedavgClient):
         self._fedtoa_prompt_selected_param_elems = selected_param_elems
 
         logger.info(
-            "[FEDTOA][PROMPT_MATCH] client=%s modality=%s configured_tokens=%s policy_order=%s matched_count=%s matched_param_elems=%s matched_names=%s matched_reasons=%s policy_added_names=%s inactive_branch_matches=%s fallback_used=%s",
+            "[FEDTOA][PROMPT_MATCH] client=%s modality=%s configured_tokens=%s policy_order=%s matched_count=%s matched_param_elems=%s matched_sample=%s inactive_branch_match_count=%s inactive_branch_sample=%s fallback_used=%s",
             self.id,
             self.modality,
             list(prompt_tokens),
             policy_order,
             len(matched_prompt_names),
             selected_param_elems,
-            matched_prompt_names,
-            selection_reasons,
-            policy_added_names,
-            inactive_prompt_matches,
+            _sample_names(matched_prompt_names),
+            len(inactive_prompt_matches),
+            _sample_names(inactive_prompt_matches),
             used_fallback,
         )
 
@@ -660,13 +663,15 @@ class FedtoaClient(FedavgClient):
         ]
         backbone_frozen = len(non_prompt_trainable_named) == 0
         logger.info(
-            "[FEDTOA][CLIENT %s] student prompt-only=%s freeze_backbone=%s backbone_frozen=%s trainable_params=%s non_prompt_trainable_params=%s trainable_elems=%s prompt_elems=%s effective_beta_topo=%.6f eta_lip=%.6f lip_enabled=%s round=%s",
+            "[FEDTOA][CLIENT %s] student prompt-only=%s freeze_backbone=%s backbone_frozen=%s trainable_param_count=%s trainable_param_sample=%s non_prompt_trainable_count=%s non_prompt_trainable_sample=%s trainable_elems=%s prompt_elems=%s effective_beta_topo=%.6f eta_lip=%.6f lip_enabled=%s round=%s",
             self.id,
             prompt_only,
             bool(getattr(self.args, "freeze_backbone", True)),
             backbone_frozen,
-            trainable_named,
-            non_prompt_trainable_named,
+            len(trainable_named),
+            _sample_names(trainable_named),
+            len(non_prompt_trainable_named),
+            _sample_names(non_prompt_trainable_named),
             trainable_count,
             prompt_count,
             beta_effective,
@@ -1050,14 +1055,17 @@ class FedtoaClient(FedavgClient):
             "topo_loss_requires_grad": bool(last_metrics.get("topo_loss_requires_grad", False)),
             "spec_loss_requires_grad": bool(last_metrics.get("spec_loss_requires_grad", False)),
             "lip_loss_requires_grad": bool(last_metrics.get("lip_loss_requires_grad", False)),
-            "matched_with_grad": list(last_metrics.get("matched_with_grad", [])),
-            "matched_with_nonzero_grad": list(last_metrics.get("matched_with_nonzero_grad", [])),
+            "matched_with_grad_count": int(len(last_metrics.get("matched_with_grad", []))),
+            "matched_with_nonzero_grad_count": int(len(last_metrics.get("matched_with_nonzero_grad", []))),
+            "matched_with_grad_sample": _sample_names(list(last_metrics.get("matched_with_grad", []))),
+            "matched_with_nonzero_grad_sample": _sample_names(list(last_metrics.get("matched_with_nonzero_grad", []))),
             "task_source": str(last_metrics.get("task_source", "unknown")),
-            "task_connected_selected_nonzero": list(last_metrics.get("task_connected_selected_nonzero", [])),
+            "task_connected_selected_nonzero_count": int(len(last_metrics.get("task_connected_selected_nonzero", []))),
+            "task_connected_selected_nonzero_sample": _sample_names(list(last_metrics.get("task_connected_selected_nonzero", []))),
             "loss_finite": dict(last_metrics.get("loss_finite", {})),
         }
         logger.info(
-            "[FEDTOA][TRAIN_METRICS] client=%s round=%s objective_mode=%s retrieval_driven=%s task_source=%s retrieval_w=%.3f aux_w=%.3f task_loss=%.6f retrieval_loss=%.6f aux_loss=%.6f topo_loss_raw=%.6f topo_loss_normalized=%.6f topo_loss_before_cap=%.6f topo_ratio_bound=%.6f topo_loss_cap=%.6f topo_task_ratio_cap=%.6f scaled_topo_term=%.6f spec_loss=%.6f scaled_spec_term=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f finite(task/topo/spec/total)=%s/%s/%s/%s prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad=%s matched_with_nonzero_grad=%s",
+            "[FEDTOA][TRAIN_METRICS] client=%s round=%s objective_mode=%s retrieval_driven=%s task_source=%s retrieval_w=%.3f aux_w=%.3f task_loss=%.6f retrieval_loss=%.6f aux_loss=%.6f topo_loss_raw=%.6f topo_loss_normalized=%.6f topo_loss_before_cap=%.6f topo_ratio_bound=%.6f topo_loss_cap=%.6f topo_task_ratio_cap=%.6f scaled_topo_term=%.6f spec_loss=%.6f scaled_spec_term=%.6f lip_loss=%.6f active_edge_count=%s effective_beta_topo=%.6f finite(task/topo/spec/total)=%s/%s/%s/%s prompt_only=%s freeze_backbone=%s total_loss_requires_grad=%s matched_with_grad_count=%s matched_with_nonzero_grad_count=%s",
             self.id,
             int(getattr(self.args, "fedtoa_comm_round", 0)),
             metric_payload["objective_mode"],
@@ -1087,8 +1095,8 @@ class FedtoaClient(FedavgClient):
             prompt_only,
             bool(getattr(self.args, "freeze_backbone", True)),
             metric_payload["total_loss_requires_grad"],
-            metric_payload["matched_with_grad"],
-            metric_payload["matched_with_nonzero_grad"],
+            metric_payload["matched_with_grad_count"],
+            metric_payload["matched_with_nonzero_grad_count"],
         )
 
         result_payload = {
@@ -1195,18 +1203,20 @@ class FedtoaClient(FedavgClient):
                 shadow_param_bytes += int(sd[key].numel() * sd[key].element_size())
 
         self._fedtoa_last_upload_stats = {
-            "uploaded_param_names": list(uploaded_param_names),
+            "uploaded_param_count": int(len(uploaded_param_names)),
+            "uploaded_param_sample": _sample_names(uploaded_param_names),
             "uploaded_param_bytes": int(uploaded_param_bytes),
             "uploaded_param_elems": int(uploaded_param_elems),
             "shadow_param_bytes": int(shadow_param_bytes),
             "allowed_param_count": int(len(allowed_param_names)),
         }
         logger.info(
-            "[FEDTOA][UPLOAD] client=%s round=%s allowed_param_count=%s uploaded_param_names=%s uploaded_param_elems=%s uploaded_param_bytes=%s shadow_param_bytes=%s",
+            "[FEDTOA][UPLOAD] client=%s round=%s allowed_param_count=%s uploaded_param_count=%s uploaded_param_sample=%s uploaded_param_elems=%s uploaded_param_bytes=%s shadow_param_bytes=%s",
             self.id,
             int(getattr(self.args, "fedtoa_comm_round", 0)),
             len(allowed_param_names),
-            uploaded_param_names,
+            len(uploaded_param_names),
+            _sample_names(uploaded_param_names),
             uploaded_param_elems,
             uploaded_param_bytes,
             shadow_param_bytes,

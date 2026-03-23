@@ -103,19 +103,22 @@ class FedtoaServer(FedavgServer):
             upload_bytes = self._state_dict_bytes(state_dict)
             student_upload += upload_bytes
             stats = getattr(client, "_fedtoa_last_upload_stats", None)
-            uploaded_param_names = []
+            uploaded_param_count = 0
+            uploaded_param_sample = []
             uploaded_param_elems = 0
             uploaded_param_bytes = upload_bytes
             shadow_param_bytes = 0
             if isinstance(stats, dict):
-                uploaded_param_names = list(stats.get("uploaded_param_names", []))
+                uploaded_param_count = int(stats.get("uploaded_param_count", 0))
+                uploaded_param_sample = list(stats.get("uploaded_param_sample", []))
                 uploaded_param_elems = int(stats.get("uploaded_param_elems", 0))
                 uploaded_param_bytes = int(stats.get("uploaded_param_bytes", upload_bytes))
                 shadow_param_bytes = int(stats.get("shadow_param_bytes", 0))
             student_prompt_upload += int(uploaded_param_bytes)
             student_shadow_bytes += int(shadow_param_bytes)
             per_client_upload[int(client_id)] = {
-                "uploaded_param_names": uploaded_param_names,
+                "uploaded_param_count": int(uploaded_param_count),
+                "uploaded_param_sample": list(uploaded_param_sample),
                 "uploaded_param_elems": int(uploaded_param_elems),
                 "uploaded_param_bytes": int(uploaded_param_bytes),
                 "shadow_param_bytes": int(shadow_param_bytes),
@@ -476,10 +479,11 @@ class FedtoaServer(FedavgServer):
             )
             for client_id, client_comm in comm.get("students", {}).items():
                 logger.info(
-                    "[FEDTOA][COMM][CLIENT] round=%s client=%s uploaded_param_names=%s uploaded_param_elems=%s uploaded_param_bytes=%s shadow_param_bytes=%s",
+                    "[FEDTOA][COMM][CLIENT] round=%s client=%s uploaded_param_count=%s uploaded_param_sample=%s uploaded_param_elems=%s uploaded_param_bytes=%s shadow_param_bytes=%s",
                     str(self.round).zfill(4),
                     client_id,
-                    client_comm.get("uploaded_param_names", []),
+                    client_comm.get("uploaded_param_count", 0),
+                    client_comm.get("uploaded_param_sample", []),
                     client_comm.get("uploaded_param_elems", 0),
                     client_comm.get("uploaded_param_bytes", 0),
                     client_comm.get("shadow_param_bytes", 0),

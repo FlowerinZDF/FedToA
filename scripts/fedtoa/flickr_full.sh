@@ -17,18 +17,20 @@ tc="${TC:-12}"
 mc="${MC:-8}"
 cncntrtn="${CNCNTRTN:-0.5}"
 c="${C_RATIO:-0.25}"
-nt="${NUM_THREAD:-8}"
+nt="${NUM_THREAD:-4}"
 seed="${SEED:-1}"
 
 # full run aligned with original FedCola Flickr script
 rounds="${ROUNDS:-30}"
 local_epochs="${LOCAL_EPOCHS:-5}"
 b="${BATCH_SIZE:-32}"
-eval_b="${EVAL_BATCH_SIZE:-128}"
+eval_b="${EVAL_BATCH_SIZE:-64}"
+eval_every="${EVAL_EVERY:-5}"
 
 # dataloader
-loader_workers="${LOADER_NUM_WORKERS:-6}"
-loader_prefetch="${LOADER_PREFETCH_FACTOR:-4}"
+loader_workers="${LOADER_NUM_WORKERS:-2}"
+loader_prefetch="${LOADER_PREFETCH_FACTOR:-2}"
+loader_persistent="${LOADER_PERSISTENT_WORKERS:-false}"
 
 # current practical FedToA defaults
 beta_topo="${BETA_TOPO:-0.05}"
@@ -60,6 +62,7 @@ echo "[RUN_CONFIG] rounds=${rounds}"
 echo "[RUN_CONFIG] local_epochs=${local_epochs}"
 echo "[RUN_CONFIG] batch_size=${b}"
 echo "[RUN_CONFIG] eval_batch_size=${eval_b}"
+echo "[RUN_CONFIG] eval_every=${eval_every}"
 echo "[RUN_CONFIG] retrieval_task_weight=${retrieval_w}"
 echo "[RUN_CONFIG] aux_task_weight=${aux_w}"
 echo "[RUN_CONFIG] topo_min_active_edges=${topo_min_edges}"
@@ -67,11 +70,17 @@ echo "[RUN_CONFIG] topo_loss_cap=${topo_loss_cap}"
 echo "[RUN_CONFIG] topo_task_ratio_cap=${topo_task_ratio_cap}"
 echo "[RUN_CONFIG] loader_num_workers=${loader_workers}"
 echo "[RUN_CONFIG] loader_prefetch_factor=${loader_prefetch}"
+echo "[RUN_CONFIG] loader_persistent_workers=${loader_persistent}"
 echo "[RUN_CONFIG] output_dir=${out_dir}"
 echo "[RUN_CONFIG] log_file=${log_file}"
 
 echo "[PRECHECK] output directory ready: ${out_dir}"
 echo "[PRECHECK] dataset/algorithm/script identity: Flickr30k / fedtoa / flickr_full.sh"
+
+loader_persistent_flag="--no-loader_persistent_workers"
+if [[ "${loader_persistent}" == "true" ]]; then
+  loader_persistent_flag="--loader_persistent_workers"
+fi
 
 python main.py \
   --exp_name FedToA \
@@ -98,7 +107,7 @@ python main.py \
   --resize 224 \
   --imnorm \
   --eval_type global \
-  --eval_every 1 \
+  --eval_every "$eval_every" \
   --eval_metrics acc1 \
   --R "$rounds" \
   --E "$local_epochs" \
@@ -112,7 +121,7 @@ python main.py \
   --num_thread "$nt" \
   --loader_num_workers "$loader_workers" \
   --loader_pin_memory \
-  --loader_persistent_workers \
+  ${loader_persistent_flag} \
   --loader_prefetch_factor "$loader_prefetch" \
   --use_bert_tokenizer \
   --pretrained \

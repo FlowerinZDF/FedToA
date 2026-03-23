@@ -720,14 +720,15 @@ class FedavgServer(BaseServer):
                 _eval_loader_kwargs = {
                     'dataset': server_dataset,
                     'batch_size': self.args.eval_batch_size,
-                    'shuffle': True,
+                    'shuffle': False,
                     'num_workers': _eval_workers,
                     'pin_memory': _eval_pin,
                     'persistent_workers': _eval_persistent,
                 }
                 if _eval_workers > 0:
                     _eval_loader_kwargs['prefetch_factor'] = _eval_prefetch
-                result = self.evaluator.evaluate(torch.utils.data.DataLoader(**_eval_loader_kwargs), eval_batch_size=self.args.eval_batch_size)
+                eval_loader = torch.utils.data.DataLoader(**_eval_loader_kwargs)
+                result = self.evaluator.evaluate(eval_loader, eval_batch_size=self.args.eval_batch_size)
                 server_log_string = f'[{self.args.algorithm.upper()}] [{dataset.upper()}] [Round: {str(self.round).zfill(4)}] [EVALUATE] [SERVER] '
 
                 res_dict = {}
@@ -756,6 +757,8 @@ class FedavgServer(BaseServer):
 
                 logger.info(server_log_string)
                 self.writer.log(res_dict, self.round)
+                self.results[self.round][f'server_evaluated_{dataset + ("after" if not fedavg else "")}'] = result
+                del eval_loader
 
             else:
                 self.global_model = self.global_models[dataset]
@@ -778,7 +781,8 @@ class FedavgServer(BaseServer):
                 }
                 if _cls_workers > 0:
                     _cls_loader_kwargs['prefetch_factor'] = _cls_prefetch
-                for inputs, targets in torch.utils.data.DataLoader(**_cls_loader_kwargs):
+                cls_loader = torch.utils.data.DataLoader(**_cls_loader_kwargs)
+                for inputs, targets in cls_loader:
                     inputs, targets = inputs.to(self.args.server_device), targets.to(self.args.server_device)
 
                     if DATASET_2_MODALITY[dataset] == 'img':
@@ -812,6 +816,12 @@ class FedavgServer(BaseServer):
                 # else:
                 #     self.writer.flush()
                 self.results[self.round][f'server_evaluated_{dataset + ("after" if not fedavg else "")}'] = result
+                del cls_loader
+                del mm
+            self.global_model.to('cpu')
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
         # Multimodal eval
 
